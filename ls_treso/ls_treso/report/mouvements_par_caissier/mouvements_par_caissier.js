@@ -25,5 +25,12 @@ frappe.query_reports["Mouvements par Caissier"] = {
 			options: "User",
 			//default: 'Administrator'
 		},
+		{
+			fieldname: "caisse",
+			label: __("Caisse"),
+			fieldtype: "Link",
+			options: "Caisse",
+			//default: 'Administrator'
+		},
 	]
 };

@@ -45,9 +45,9 @@ def get_data(filters):
 			) o 
 		INNER JOIN `tabDetails Operation de Caisse` d on o.name = d.parent
 		INNER JOIN `tabNature Operations` n on d.nature_operations = n.name
-		where o.date >= %(date_debut)s and o.date <= %(date_fin)s and o.owner LIKE %(caissier)s
+		where o.date >= %(date_debut)s and o.date <= %(date_fin)s and o.owner LIKE %(caissier)s and o.caisse LIKE %(caisse)s
 
-        """,{"date_debut": filters.date_debut, "date_fin": filters.date_fin, "caissier": filters.caissier if filters.caissier !=  None else "%"}, as_dict = 1
+        """,{"date_debut": filters.date_debut, "date_fin": filters.date_fin, "caissier": filters.caissier if filters.caissier !=  None else "%", "caisse": filters.caisse if filters.caisse !=  None else "%"}, as_dict = 1
     )
 
 	return data
