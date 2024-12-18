@@ -17,6 +17,7 @@ def get_columns(filters):
 		{ "label": _("Caisse"), "fieldtype": "Link", "fieldname": "caisse", "options": "Caisse", "width": 100, },
 		{ "label": _("Bénéficiaire"), "fieldtype": "Data", "fieldname": "remettant", "width": 100, },
 		{ "label": _("Désignation"), "fieldtype": "Data", "fieldname": "designation", "width": 100, },
+		{ "label": _("Nature"), "fieldtype": "Link", "fieldname": "nature_operations", "options": "Nature Operations", "width": 100, },
 		{ "label": _("Montant"), "fieldtype": "Currency", "fieldname": "montant", "options": "devise", "width": 100, },
 	]
 	return columns
@@ -32,8 +33,8 @@ def get_data(filters):
 		o.name, 
 		o.remettant,
 		o.designation,
-		o.montant,
-		o.devise, o.caisse
+		d.montant_devise AS montant,
+		o.devise, o.caisse, d.nature_operations
 		FROM (
 			SELECT c.name,c.remettant,c.designation,c.reference,c.devise,c.creation,c.caisse,c.montant,c.date
 			FROM tabEncaissement c

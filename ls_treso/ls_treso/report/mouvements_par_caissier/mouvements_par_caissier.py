@@ -17,6 +17,7 @@ def get_columns(filters):
 		{ "label": _("Caisse"), "fieldtype": "Link", "fieldname": "caisse", "options": "Caisse", "width": 100, },
 		{ "label": _("N° Pièce"), "fieldtype": "Data",	"fieldname": "name", "width": 100, },
 		{ "label": _("Désignation"), "fieldtype": "Data", "fieldname": "designation", "width": 100, },
+		{ "label": _("Nature"), "fieldtype": "Link", "fieldname": "nature_operations", "options": "Nature Operations", "width": 100, },
 		{ "label": _("Recette"), "fieldtype": "Currency", "fieldname": "recette", "options": "devise", "width": 100, },
 		{ "label": _("Dépense"), "fieldtype": "Currency", "fieldname": "depense", "options": "devise", "width": 100, },
 		{ "label": _("Devise"), "fieldtype": "Link", "fieldname": "devise", "options": "Devise", "width": 100, },
@@ -33,9 +34,9 @@ def get_data(filters):
         select o.date, 
 		o.name, 
 		o.designation,
-		case when n.type_operation = 'Encaissement' THEN o.montant ELSE 0 END as 'recette',
-		case when n.type_operation <> 'Encaissement' THEN o.montant ELSE 0 END as 'depense', 
-		o.devise, o.caisse
+		case when n.type_operation = 'Encaissement' THEN d.montant_devise ELSE 0 END as 'recette',
+		case when n.type_operation <> 'Encaissement' THEN d.montant_devise ELSE 0 END as 'depense', 
+		o.devise, o.caisse, d.nature_operations
 		from (
 			SELECT c.name,c.remettant,c.designation,c.reference,c.devise,c.creation,c.caisse,c.montant,c.date, c.owner
 			FROM tabEncaissement c
