@@ -163,15 +163,6 @@
    "label": "Cours Societe"
   },
   {
-   "fieldname": "amended_from",
-   "fieldtype": "Link",
-   "label": "Amended From",
-   "no_copy": 1,
-   "options": "Demande Paiement",
-   "print_hide": 1,
-   "read_only": 1
-  },
-  {
    "default": "0",
    "fieldname": "positione",
    "fieldtype": "Check",
