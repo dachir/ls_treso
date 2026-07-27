@@ -476,7 +476,7 @@ class Encaissement(Document):
 			devise = self.get_account("Account",account,"round_off_account")
 			cours = flt(get_cours(self.devise, devise)[0].cours)
 			accounting_entry = self.create_row('Decaissement',round_off_account,cours,payable_amount)
-			accounts.append(journal_entry)
+			accounts.append(accounting_entry)
 		
 		if len(currencies) > 1:
 			multi_currency = 1
