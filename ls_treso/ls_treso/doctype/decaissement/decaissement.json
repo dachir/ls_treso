@@ -14,18 +14,23 @@
   "designation",
   "montant",
   "montant_reference",
+  "montant_avances_utilisees",
+  "montant_total_operation",
+  "column_break_10",
   "entite",
   "reference",
   "a_justifier",
-  "column_break_10",
   "site",
   "devise_caisse",
   "date",
+  "column_break_omimi",
   "type_operation",
   "devise",
   "cours",
   "remettant",
   "commentaire",
+  "section_break_eyu9q",
+  "advance_allocation",
   "section_break_20",
   "details_operation_de_caisse",
   "justifie",
@@ -244,6 +249,32 @@
    "fieldtype": "Check",
    "hidden": 1,
    "label": "Comptabilite Erpnext"
+  },
+  {
+   "fieldname": "column_break_omimi",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "section_break_eyu9q",
+   "fieldtype": "Section Break"
+  },
+  {
+   "fieldname": "advance_allocation",
+   "fieldtype": "Table",
+   "label": "Advance Allocation",
+   "options": "Advance Allocation"
+  },
+  {
+   "fieldname": "montant_avances_utilisees",
+   "fieldtype": "Currency",
+   "label": "Montant Avance",
+   "options": "devise"
+  },
+  {
+   "fieldname": "montant_total_operation",
+   "fieldtype": "Currency",
+   "label": "Total",
+   "options": "devise"
   }
  ],
  "index_web_pages_for_search": 1,
@@ -254,7 +285,7 @@
    "link_fieldname": "cheque_no"
   }
  ],
- "modified": "2023-07-20 09:04:28.929876",
+ "modified": "2026-08-08 17:31:18.572410",
  "modified_by": "Administrator",
  "module": "Ls Treso",
  "name": "Decaissement",

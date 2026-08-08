@@ -36,7 +36,9 @@
   "label_7",
   "label_8",
   "label_9",
-  "label_10"
+  "label_10",
+  "document_type",
+  "invoice"
  ],
  "fields": [
   {
@@ -239,12 +241,24 @@
    "fieldtype": "Data",
    "hidden": 1,
    "label": "Label 10"
+  },
+  {
+   "fieldname": "document_type",
+   "fieldtype": "Select",
+   "label": "Document type",
+   "options": "Sales Invoice\nPurchase Invoice"
+  },
+  {
+   "fieldname": "invoice",
+   "fieldtype": "Dynamic Link",
+   "label": "Document",
+   "options": "document_type"
   }
  ],
  "index_web_pages_for_search": 1,
  "istable": 1,
  "links": [],
- "modified": "2023-07-18 10:00:42.622577",
+ "modified": "2026-08-08 17:08:13.966908",
  "modified_by": "Administrator",
  "module": "Ls Treso",
  "name": "Details Operation de Caisse",

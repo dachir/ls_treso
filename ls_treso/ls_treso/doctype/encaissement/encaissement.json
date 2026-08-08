@@ -14,19 +14,24 @@
   "designation",
   "montant",
   "montant_reference",
+  "montant_avances_utilisees",
+  "montant_total_operation",
+  "column_break_6",
   "entite",
   "reference",
   "a_justifier",
-  "column_break_6",
   "site",
   "devise_caisse",
   "date",
+  "column_break_qjiiu",
   "type_operation",
   "devise",
   "cours",
   "remettant",
   "commentaire",
   "code_type",
+  "section_break_4n1wt",
+  "advance_allocation",
   "section_break_11",
   "details_operation_de_caisse",
   "justifie",
@@ -252,6 +257,32 @@
    "fieldtype": "Check",
    "hidden": 1,
    "label": "Comptabilite ErpNext"
+  },
+  {
+   "fieldname": "column_break_qjiiu",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "section_break_4n1wt",
+   "fieldtype": "Section Break"
+  },
+  {
+   "fieldname": "advance_allocation",
+   "fieldtype": "Table",
+   "label": "Advance Allocation",
+   "options": "Advance Allocation"
+  },
+  {
+   "fieldname": "montant_avances_utilisees",
+   "fieldtype": "Currency",
+   "label": "Montant Avance",
+   "options": "devise"
+  },
+  {
+   "fieldname": "montant_total_operation",
+   "fieldtype": "Currency",
+   "label": "Total",
+   "options": "devise"
   }
  ],
  "index_web_pages_for_search": 1,
@@ -262,7 +293,7 @@
    "link_fieldname": "cheque_no"
   }
  ],
- "modified": "2023-07-20 09:06:24.488470",
+ "modified": "2026-08-08 17:30:25.317729",
  "modified_by": "Administrator",
  "module": "Ls Treso",
  "name": "Encaissement",
