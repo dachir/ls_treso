@@ -40,6 +40,32 @@ function load_advance_payment(frm, cdt, cdn) {
 	});
 }
 
+
+function load_invoice_details(frm, cdt, cdn) {
+	let row = locals[cdt][cdn];
+	if (!row.invoice) return;
+
+	frappe.call({
+		method: "ls_treso.ls_treso.utils.payment_utils.get_invoice_details",
+		args: {
+			document_type: row.document_type,
+			invoice: row.invoice,
+			societe: frm.doc.societe
+		},
+		callback: function(r) {
+			if (!r.message) return;
+
+			frappe.model.set_value(cdt, cdn, "type_tiers", r.message.type_tiers || "");
+			frappe.model.set_value(cdt, cdn, "tiers", r.message.tiers || "");
+
+			for (let i = 1; i <= 10; i++) {
+				let fieldname = i === 1 ? "imputation_analytique" : `imputation_analytique_${i}`;
+				frappe.model.set_value(cdt, cdn, fieldname, r.message[fieldname] || "");
+			}
+		}
+	});
+}
+
 frappe.ui.form.on('Decaissement', {
 	setup: function(frm) {
 		frm.set_query("initialisation", function() {
@@ -399,6 +425,9 @@ frappe.ui.form.on('Decaissement', {
 
 frappe.ui.form.on('Details Operation de Caisse', {
 	
+	invoice(frm, cdt, cdn) {
+		load_invoice_details(frm, cdt, cdn);
+	},
     montant_devise(frm, cdt, cdn) {
 		var row = locals[cdt][cdn];
         if(row.montant_devise && frm.doc.cours){

@@ -281,11 +281,11 @@
  "is_submittable": 1,
  "links": [
   {
-   "link_doctype": "Journal Entry",
-   "link_fieldname": "cheque_no"
+   "link_doctype": "Payment Entry",
+   "link_fieldname": "reference_no"
   }
  ],
- "modified": "2026-08-08 17:31:18.572410",
+ "modified": "2026-08-10 14:36:53.779078",
  "modified_by": "Administrator",
  "module": "Ls Treso",
  "name": "Decaissement",

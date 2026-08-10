@@ -6,11 +6,17 @@ from frappe import _
 from frappe.model.document import Document
 from frappe.utils import getdate
 from frappe.utils import flt
-import json
 from ls_treso.ls_treso.doctype.devise.devise import get_cours
 from erpnext.setup.utils import get_exchange_rate
-from erpnext.accounts.doctype.payment_entry.payment_entry import get_payment_entry
-from erpnext.accounts.party import get_party_account
+from ls_treso.ls_treso.utils.payment_utils import (
+	ACTIVE_MODES,
+	cancel_payment_entry,
+	get_ls_treso_mode,
+	make_payment_entry,
+	prepare_operation,
+	reconcile_advances,
+	unreconcile_advances,
+)
 
 class Decaissement(Document):
 	
@@ -64,17 +70,17 @@ class Decaissement(Document):
 
 	
 	def before_submit(self):
-		mode = frappe.db.get_single_value("LS Treso Settings", "operating_mode")
+		mode = get_ls_treso_mode()
 
 		if self.type_caisse == 'Caisse':
 			init_doc = frappe.get_doc("Caisse Initialisation", self.initialisation)
 			if float(init_doc.solde_final) < float(self.montant):
 				frappe.throw("Le montant actuellement en caisse ne permet pas de faire cette opération.\n Il faut augmenter le solde!!!")
 
-		if mode in ("Standalone", "ERPNext Integrated", "External Export"):
-			self.set_operation_totals()
-			self.make_payment_entry()
-			self.reconcile_advances()
+		if mode in ACTIVE_MODES:
+			prepare_operation(self)
+			make_payment_entry(self)
+			reconcile_advances(self)
 		else:
 			total = 0.00
 			for details in self.details_operation_de_caisse:
@@ -110,10 +116,10 @@ class Decaissement(Document):
 		self.comptabilisation.clear()
 
 
-		mode = frappe.db.get_single_value("LS Treso Settings", "operating_mode")
-		if mode in ("Standalone", "ERPNext Integrated", "External Export"):
-			self.unreconcile_advances()
-			self.cancel_payment_entry()
+		mode = get_ls_treso_mode()
+		if mode in ACTIVE_MODES:
+			unreconcile_advances(self)
+			cancel_payment_entry(self)
 		elif self.comptabilite_erpnext == 1:
 			nb = frappe.db.count("Journal Entry", {"cheque_no": self.name})
 			if nb > 0:
@@ -473,248 +479,6 @@ class Decaissement(Document):
 		#id = frappe.db.get_list("Account",fields=['name'],filters={"account_number": code}) 
 		return code
 	
-	def set_operation_totals(self):
-		advance_total = sum(flt(d.allocated_amount) for d in (self.advance_allocation or []))
-		self.montant_avances_utilisees = advance_total
-		self.montant_total_operation = flt(self.montant) + advance_total
-
-		detail_total = sum(flt(d.montant_devise) for d in self.details_operation_de_caisse)
-		if flt(detail_total, 2) != flt(self.montant_total_operation, 2):
-			frappe.throw(_("Le total des détails {0} doit être égal au montant total de l'opération {1}").format(detail_total, self.montant_total_operation))
-
-	def get_invoice_rows(self, validate_outstanding=True):
-		amounts = {}
-		order = []
-		new_advance_amount = 0
-
-		for row in self.details_operation_de_caisse:
-			is_advance = frappe.db.get_value("Nature Operations", row.nature_operations, "is_advance")
-			if is_advance:
-				if row.invoice:
-					frappe.throw(_("Ligne {0}: une nature Avance ne peut pas être liée à une facture").format(row.idx))
-				new_advance_amount += flt(row.montant_devise)
-				continue
-
-			if row.document_type != "Purchase Invoice":
-				frappe.throw(_("Ligne {0}: un décaissement ne peut contenir que des Purchase Invoices").format(row.idx))
-			if not row.invoice:
-				frappe.throw(_("Ligne {0}: veuillez sélectionner une Purchase Invoice").format(row.idx))
-
-			if row.invoice not in amounts:
-				amounts[row.invoice] = 0
-				order.append(row.invoice)
-			amounts[row.invoice] += flt(row.montant_devise)
-
-		invoice_rows = []
-		party = None
-		company = None
-		for name in order:
-			invoice = frappe.get_doc("Purchase Invoice", name)
-			if invoice.docstatus != 1:
-				frappe.throw(_("La Purchase Invoice {0} doit être soumise").format(name))
-			if party and invoice.supplier != party:
-				frappe.throw(_("Toutes les Purchase Invoices doivent appartenir au même fournisseur"))
-			if company and invoice.company != company:
-				frappe.throw(_("Toutes les Purchase Invoices doivent appartenir à la même société"))
-			party = party or invoice.supplier
-			company = company or invoice.company
-			if validate_outstanding and flt(amounts[name], 2) > flt(invoice.outstanding_amount, 2):
-				frappe.throw(_("Le montant {0} dépasse le solde disponible de la Purchase Invoice {1} ({2})").format(amounts[name], name, invoice.outstanding_amount))
-			invoice_rows.append(frappe._dict({"name": name, "amount": amounts[name], "invoice": invoice}))
-
-		return invoice_rows, new_advance_amount, party, company
-
-	def get_advance_distribution(self, invoice_rows, party=None, company=None, check_available=True):
-		remaining_by_invoice = {d.name: flt(d.amount) for d in invoice_rows}
-		distribution = []
-		seen = set()
-
-		for row in self.advance_allocation or []:
-			if not row.payment_entry or flt(row.allocated_amount) <= 0:
-				continue
-			if row.payment_entry in seen:
-				frappe.throw(_("Le Payment Entry {0} ne doit apparaître qu'une seule fois dans les avances").format(row.payment_entry))
-			seen.add(row.payment_entry)
-
-			payment = frappe.get_doc("Payment Entry", row.payment_entry)
-			if payment.docstatus != 1 or payment.payment_type != "Pay" or payment.party_type != "Supplier":
-				frappe.throw(_("Le Payment Entry {0} n'est pas une avance fournisseur valide").format(row.payment_entry))
-			if party and payment.party != party:
-				frappe.throw(_("Le Payment Entry {0} appartient au fournisseur {1} et non à {2}").format(row.payment_entry, payment.party, party))
-			if company and payment.company != company:
-				frappe.throw(_("Le Payment Entry {0} appartient à une autre société").format(row.payment_entry))
-
-			available = flt(payment.unallocated_amount)
-			row.available_amount = available
-			if check_available and flt(row.allocated_amount, 2) > flt(available, 2):
-				frappe.throw(_("Le montant alloué sur {0} dépasse le montant disponible {1}").format(row.payment_entry, available))
-
-			remaining = flt(row.allocated_amount)
-			allocations = []
-			for invoice in invoice_rows:
-				if remaining <= 0:
-					break
-				available_on_invoice = flt(remaining_by_invoice.get(invoice.name))
-				if available_on_invoice <= 0:
-					continue
-				amount = min(remaining, available_on_invoice)
-				allocations.append(frappe._dict({"invoice": invoice.name, "amount": amount}))
-				remaining_by_invoice[invoice.name] = available_on_invoice - amount
-				remaining -= amount
-
-			if flt(remaining, 2) > 0:
-				frappe.throw(_("Le montant d'avance sélectionné dépasse le montant des Purchase Invoices à régler"))
-			distribution.append(frappe._dict({"row": row, "payment": payment, "allocations": allocations}))
-
-		return distribution
-
-	def make_payment_entry(self):
-		if flt(self.montant) <= 0:
-			return
-
-		caisse_account = frappe.db.get_value("Caisse", self.caisse, "compte_comptable")
-		if not caisse_account:
-			frappe.throw(_("Veuillez renseigner le compte comptable de la caisse {0}").format(self.caisse))
-
-		invoice_rows, new_advance_amount, party, company = self.get_invoice_rows()
-		distribution = self.get_advance_distribution(invoice_rows, party, company)
-		advance_by_invoice = {}
-		for advance in distribution:
-			for allocation in advance.allocations:
-				advance_by_invoice[allocation.invoice] = flt(advance_by_invoice.get(allocation.invoice)) + flt(allocation.amount)
-
-		allocations = {}
-		for invoice in invoice_rows:
-			amount = flt(invoice.amount) - flt(advance_by_invoice.get(invoice.name))
-			if amount > 0:
-				allocations[invoice.name] = amount
-
-		current_allocated = sum(allocations.values())
-		if flt(current_allocated + new_advance_amount, 2) != flt(self.montant, 2):
-			frappe.throw(_("Le montant courant ne correspond pas aux factures et aux nouvelles avances"))
-
-		if invoice_rows:
-			first_invoice = invoice_rows[0].name
-			pe = get_payment_entry(
-				"Purchase Invoice",
-				first_invoice,
-				party_amount=flt(self.montant),
-				bank_account=caisse_account,
-				bank_amount=flt(self.montant_reference or self.montant),
-				payment_type="Pay",
-				reference_date=self.date,
-			)
-			pe.set("references", [])
-		else:
-			party = next((d.tiers for d in self.details_operation_de_caisse if d.tiers), None)
-			if not party or not frappe.db.exists("Supplier", party):
-				frappe.throw(_("Une avance sans facture doit avoir un Supplier ERPNext valide dans Tiers"))
-			company = frappe.db.get_value("Account", caisse_account, "company")
-			pe = frappe.new_doc("Payment Entry")
-			pe.payment_type = "Pay"
-			pe.company = company
-			pe.party_type = "Supplier"
-			pe.party = party
-			pe.paid_from = caisse_account
-			pe.paid_to = get_party_account("Supplier", party, company)
-
-		for invoice_name, amount in allocations.items():
-			pe.append("references", {
-				"reference_doctype": "Purchase Invoice",
-				"reference_name": invoice_name,
-				"allocated_amount": amount,
-			})
-
-		pe.posting_date = self.date
-		pe.reference_no = self.name
-		pe.reference_date = self.date
-		pe.remarks = _("{0} LS Tréso {1}").format(self.doctype, self.name)
-		pe.paid_amount = flt(self.montant_reference or self.montant)
-		pe.received_amount = flt(self.montant)
-		pe.submit()
-
-	def reconcile_advances(self):
-		invoice_rows, _, party, company = self.get_invoice_rows(validate_outstanding=False)
-		distribution = self.get_advance_distribution(invoice_rows, party, company)
-
-		for advance in distribution:
-			if not advance.allocations:
-				continue
-
-			payment_doc = advance.payment
-			recon = frappe.new_doc("Payment Reconciliation")
-			recon.company = payment_doc.company
-			recon.party_type = "Supplier"
-			recon.party = payment_doc.party
-			recon.receivable_payable_account = payment_doc.paid_to
-			recon.payment_name = payment_doc.name
-			recon.get_unreconciled_entries()
-
-			payment = next((d for d in recon.payments if d.reference_type == "Payment Entry" and d.reference_name == payment_doc.name), None)
-			if not payment:
-				frappe.throw(_("Le Payment Entry {0} n'a plus de montant disponible").format(payment_doc.name))
-
-			allocated_total = sum(flt(d.amount) for d in advance.allocations)
-			if flt(allocated_total, 2) > flt(payment.amount, 2):
-				frappe.throw(_("Le montant alloué dépasse le montant disponible du Payment Entry {0}").format(payment_doc.name))
-
-			payment.unreconciled_amount = flt(payment.amount)
-			exchange_map = recon.get_invoice_exchange_map(recon.invoices, [payment])
-			remaining_payment = flt(payment.amount)
-
-			for allocation in advance.allocations:
-				if frappe.db.exists("Payment Entry Reference", {
-					"parent": payment_doc.name,
-					"reference_doctype": "Purchase Invoice",
-					"reference_name": allocation.invoice,
-					"docstatus": 1,
-				}):
-					frappe.throw(_("Le Payment Entry {0} est déjà rapproché avec {1}").format(payment_doc.name, allocation.invoice))
-
-				invoice = next((d for d in recon.invoices if d.invoice_type == "Purchase Invoice" and d.invoice_number == allocation.invoice), None)
-				if not invoice or flt(allocation.amount, 2) > flt(invoice.outstanding_amount, 2):
-					frappe.throw(_("Impossible de rapprocher {0} avec la Purchase Invoice {1}").format(payment_doc.name, allocation.invoice))
-
-				payment.amount = remaining_payment
-				invoice.exchange_rate = exchange_map.get(invoice.invoice_number)
-				row = recon.get_allocated_entry(payment, invoice, flt(allocation.amount))
-				row.unreconciled_amount = payment.unreconciled_amount
-				row.difference_amount = recon.get_difference_amount(payment, invoice, flt(allocation.amount))
-				row.difference_account = frappe.db.get_value("Company", payment_doc.company, "exchange_gain_loss_account")
-				row.exchange_rate = invoice.exchange_rate
-				row.gain_loss_posting_date = self.date
-				recon.append("allocation", row)
-				remaining_payment -= flt(allocation.amount)
-
-			recon.reconcile()
-
-	def unreconcile_advances(self):
-		if not self.advance_allocation:
-			return
-
-		from erpnext.accounts.doctype.unreconcile_payment.unreconcile_payment import create_unreconcile_doc_for_selection
-
-		invoice_rows, _, party, company = self.get_invoice_rows(validate_outstanding=False)
-		distribution = self.get_advance_distribution(invoice_rows, party, company, check_available=False)
-		selections = []
-		for advance in distribution:
-			for allocation in advance.allocations:
-				selections.append({
-					"company": advance.payment.company,
-					"voucher_type": "Payment Entry",
-					"voucher_no": advance.payment.name,
-					"against_voucher_type": "Purchase Invoice",
-					"against_voucher_no": allocation.invoice,
-				})
-
-		if selections:
-			create_unreconcile_doc_for_selection(json.dumps(selections))
-
-	def cancel_payment_entry(self):
-		name = frappe.db.get_value("Payment Entry", {"reference_no": self.name, "docstatus": 1}, "name")
-		if name:
-			frappe.get_doc("Payment Entry", name).cancel()
-
 	def make_accrual_jv_entry(self):
 		precision = frappe.get_precision("Journal Entry Account", "debit_in_account_currency")
 		journal_entry = frappe.new_doc("Journal Entry")

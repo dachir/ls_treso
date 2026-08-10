@@ -1,0 +1,892 @@
+# Copyright (c) 2026, Kossivi Amouzou and contributors
+# For license information, please see license.txt
+
+import json
+
+import frappe
+from frappe import _
+from frappe.utils import flt
+from erpnext.accounts.doctype.payment_entry.payment_entry import get_payment_entry
+from erpnext.accounts.party import get_party_account
+
+
+ACTIVE_MODES = ("Standalone", "ERPNext Integrated", "External Export")
+
+
+_OPERATION_CONFIG = {
+    "Encaissement": frappe._dict({
+        "invoice_doctype": "Sales Invoice",
+        "item_doctype": "Sales Invoice Item",
+        "party_doctype": "Customer",
+        "party_field": "customer",
+        "tiers_type": "CLIENT",
+        "detail_tiers_type": "Client",
+        "payment_type": "Receive",
+        "account_field": "income_account",
+    }),
+    "Decaissement": frappe._dict({
+        "invoice_doctype": "Purchase Invoice",
+        "item_doctype": "Purchase Invoice Item",
+        "party_doctype": "Supplier",
+        "party_field": "supplier",
+        "tiers_type": "FOURNISSEUR",
+        "detail_tiers_type": "Fournisseur",
+        "payment_type": "Pay",
+        "account_field": "expense_account",
+    }),
+}
+
+
+def get_ls_treso_mode():
+    return frappe.db.get_single_value("LS Treso Settings", "operating_mode")
+
+
+def get_operation_config(doc_or_doctype):
+    doctype = doc_or_doctype if isinstance(doc_or_doctype, str) else doc_or_doctype.doctype
+    config = _OPERATION_CONFIG.get(doctype)
+    if not config:
+        frappe.throw(_("Type d'opération non supporté: {0}").format(doctype))
+    return config
+
+
+def _imputation_field(axis_type):
+    try:
+        index = int((axis_type or "").replace("Axe", "").strip())
+    except ValueError:
+        return None
+    if index < 1 or index > 10:
+        return None
+    return "imputation_analytique" if index == 1 else f"imputation_analytique_{index}"
+
+
+def _find_dimension_field(meta, dimension_doctype):
+    if not meta or not dimension_doctype:
+        return None
+
+    # New model: Axe Analytique.correspondance contains the ERPNext dimension DocType.
+    for df in meta.fields:
+        if df.fieldtype == "Link" and df.options == dimension_doctype:
+            return df.fieldname
+
+    # Compatibility with old configurations where correspondence contained the label.
+    for df in meta.fields:
+        if df.label == dimension_doctype:
+            return df.fieldname
+
+    return None
+
+
+def _get_invoice_dimension_value(invoice, dimension_doctype):
+    fieldname = _find_dimension_field(invoice.meta, dimension_doctype)
+    if fieldname and invoice.get(fieldname):
+        return invoice.get(fieldname)
+
+    items_field = invoice.meta.get_field("items")
+    if not items_field:
+        return None
+
+    item_meta = frappe.get_meta(items_field.options)
+    item_fieldname = _find_dimension_field(item_meta, dimension_doctype)
+    if not item_fieldname:
+        return None
+
+    values = {row.get(item_fieldname) for row in invoice.get("items") or [] if row.get(item_fieldname)}
+    if len(values) == 1:
+        return values.pop()
+
+    # A Detail Operation can only contain one Section Analytique per axis.
+    # If the invoice contains several values, the user keeps the possibility to fill it manually.
+    return None
+
+
+def _get_section_for_dimension(axis_name, dimension_value):
+    if not axis_name or not dimension_value:
+        return None
+
+    return frappe.db.get_value(
+        "Section Analytique",
+        {"section": axis_name, "compte": dimension_value},
+        "name",
+    )
+
+
+@frappe.whitelist()
+def get_invoice_details(document_type, invoice, societe=None):
+    """Return Tiers + LS analytical imputations from a Sales/Purchase Invoice."""
+    if document_type not in ("Sales Invoice", "Purchase Invoice"):
+        frappe.throw(_("Le document doit être une Sales Invoice ou une Purchase Invoice"))
+
+    config = _OPERATION_CONFIG["Encaissement" if document_type == "Sales Invoice" else "Decaissement"]
+    invoice_doc = frappe.get_doc(document_type, invoice)
+
+    if invoice_doc.docstatus != 1:
+        frappe.throw(_("La facture {0} doit être soumise").format(invoice))
+
+    if societe and frappe.db.exists("Company", societe) and invoice_doc.company != societe:
+        frappe.throw(_("La facture {0} appartient à la société {1}").format(invoice, invoice_doc.company))
+
+    party = invoice_doc.get(config.party_field)
+    tiers = frappe.db.get_value(
+        "Tiers",
+        {"code": party, "type": config.tiers_type},
+        "name",
+    )
+
+    result = {
+        "type_tiers": config.detail_tiers_type,
+        "tiers": tiers or "",
+    }
+
+    axes = frappe.get_all(
+        "Axe Analytique",
+        filters={"type": ["in", [f"Axe {i}" for i in range(1, 11)]]},
+        fields=["name", "type", "correspondance"],
+        order_by="type asc",
+    )
+
+    for axis in axes:
+        fieldname = _imputation_field(axis.type)
+        if not fieldname or not axis.correspondance:
+            continue
+
+        dimension_value = _get_invoice_dimension_value(invoice_doc, axis.correspondance)
+        section = _get_section_for_dimension(axis.name, dimension_value)
+        if section:
+            result[fieldname] = section
+
+    return result
+
+
+def _get_erpnext_party(tiers_name, config):
+    if not tiers_name:
+        frappe.throw(_("Veuillez renseigner le tiers"))
+
+    tiers = frappe.get_doc("Tiers", tiers_name)
+    if tiers.type != config.tiers_type:
+        frappe.throw(
+            _("Le tiers {0} doit être de type {1}").format(tiers_name, config.tiers_type)
+        )
+
+    party = tiers.code
+    if not frappe.db.exists(config.party_doctype, party):
+        frappe.throw(
+            _("Le tiers {0} n'a pas de correspondance avec un {1} ERPNext").format(
+                tiers_name, config.party_doctype
+            )
+        )
+    return party
+
+
+def _get_dimension_values_from_detail(row, item_doctype):
+    values = {}
+    item_meta = frappe.get_meta(item_doctype)
+
+    for index in range(1, 11):
+        fieldname = "imputation_analytique" if index == 1 else f"imputation_analytique_{index}"
+        section_name = row.get(fieldname)
+        if not section_name:
+            continue
+
+        section = frappe.get_doc("Section Analytique", section_name)
+        axis = frappe.get_doc("Axe Analytique", section.section)
+        dimension_field = _find_dimension_field(item_meta, axis.correspondance)
+        if dimension_field:
+            values[dimension_field] = section.compte
+
+    return values
+
+
+def _get_nature_flags(row):
+    if not row.nature_operations:
+        return frappe._dict()
+
+    return frappe._dict(
+        frappe.db.get_value(
+            "Nature Operations",
+            row.nature_operations,
+            ["is_advance", "echange", "solde_initial", "compte_comptable"],
+            as_dict=True,
+        )
+        or {}
+    )
+
+
+def get_special_operation(doc):
+    """Return the unique special detail when operation is Exchange or Opening Balance."""
+    special_rows = []
+
+    for row in doc.details_operation_de_caisse or []:
+        nature = _get_nature_flags(row)
+        if nature.echange or nature.solde_initial:
+            special_rows.append((row, nature))
+
+    if not special_rows:
+        return None
+
+    if len(doc.details_operation_de_caisse or []) != 1:
+        frappe.throw(
+            _("Une opération d'échange ou de solde initial doit contenir une seule ligne de détail")
+        )
+
+    row, nature = special_rows[0]
+
+    if nature.echange and nature.solde_initial:
+        frappe.throw(_("Une Nature ne peut pas être à la fois Échange et Solde initial"))
+
+    if row.invoice:
+        frappe.throw(
+            _("Une opération d'échange ou de solde initial ne doit pas être liée à une facture")
+        )
+
+    if doc.advance_allocation:
+        frappe.throw(
+            _("Une opération d'échange ou de solde initial ne peut pas utiliser d'avance")
+        )
+
+    if nature.solde_initial and doc.doctype != "Encaissement":
+        frappe.throw(_("Une Nature Solde initial ne peut être utilisée que sur un Encaissement"))
+
+    return frappe._dict({"row": row, "nature": nature})
+
+
+def _apply_special_dimensions(payment_entry, detail):
+    """Copy Nature + LS analytical imputations to Payment Entry when representable."""
+    pe_meta = frappe.get_meta("Payment Entry")
+
+    nature_field = _find_dimension_field(pe_meta, "Nature Operations")
+    if nature_field and detail.nature_operations:
+        payment_entry.set(nature_field, detail.nature_operations)
+
+    for fieldname, value in _get_dimension_values_from_detail(detail, "Payment Entry").items():
+        if pe_meta.has_field(fieldname):
+            payment_entry.set(fieldname, value)
+
+
+def _get_caisse_account(caisse):
+    account = frappe.db.get_value("Caisse", caisse, "compte_comptable")
+    if not account or not frappe.db.exists("Account", account):
+        frappe.throw(_("Veuillez renseigner un Account ERPNext valide sur la caisse {0}").format(caisse))
+    return account
+
+
+def _make_internal_transfer(
+    source_account,
+    target_account,
+    paid_amount,
+    received_amount,
+    posting_date,
+    reference_no,
+    detail,
+    remarks=None,
+):
+    source_company = frappe.db.get_value("Account", source_account, "company")
+    target_company = frappe.db.get_value("Account", target_account, "company")
+
+    if not source_company or source_company != target_company:
+        frappe.throw(_("Les comptes source et destination doivent appartenir à la même Company"))
+
+    if source_account == target_account:
+        frappe.throw(_("Le compte source et le compte destination doivent être différents"))
+
+    pe = frappe.new_doc("Payment Entry")
+    pe.payment_type = "Internal Transfer"
+    pe.company = source_company
+    pe.posting_date = posting_date
+    pe.reference_no = reference_no
+    pe.reference_date = posting_date
+    pe.paid_from = source_account
+    pe.paid_to = target_account
+    pe.paid_amount = flt(paid_amount)
+    pe.received_amount = flt(received_amount)
+    pe.remarks = remarks or _("Transfert LS Tréso {0}").format(reference_no)
+
+    _apply_special_dimensions(pe, detail)
+    pe.submit()
+    return pe
+
+
+def make_internal_transfer_payment_entry(source_doc, target_doc=None):
+    """Create the single ERPNext Internal Transfer for an LS Tréso cash transfer."""
+    source_special = get_special_operation(source_doc)
+    if not source_special or not source_special.nature.echange:
+        frappe.throw(_("Le document source n'est pas une opération d'échange"))
+    if source_doc.doctype != "Decaissement":
+        frappe.throw(_("Le document source du transfert doit être un Décaissement"))
+
+    source_account = _get_caisse_account(source_doc.caisse)
+
+    if target_doc:
+        target_special = get_special_operation(target_doc)
+        if not target_special or not target_special.nature.echange:
+            frappe.throw(_("Le document destination n'est pas une opération d'échange"))
+        if target_doc.doctype != "Encaissement":
+            frappe.throw(_("Le document destination du transfert doit être un Encaissement"))
+        target_caisse = target_doc.caisse
+        received_amount = flt(target_doc.montant)
+    else:
+        target_caisse = source_doc.remettant
+        received_amount = flt(source_doc.montant_reference or source_doc.montant)
+
+    if not target_caisse or not frappe.db.exists("Caisse", target_caisse):
+        frappe.throw(_("La caisse destination du transfert est invalide"))
+
+    target_account = _get_caisse_account(target_caisse)
+
+    return _make_internal_transfer(
+        source_account=source_account,
+        target_account=target_account,
+        paid_amount=source_doc.montant,
+        received_amount=received_amount,
+        posting_date=source_doc.date,
+        reference_no=source_doc.name,
+        detail=source_special.row,
+        remarks=_("Transfert de caisse {0} vers {1}").format(source_doc.caisse, target_caisse),
+    )
+
+
+def _make_opening_balance_payment_entry(doc, special):
+    source_account = special.nature.compte_comptable
+    if not source_account or not frappe.db.exists("Account", source_account):
+        frappe.throw(
+            _("La Nature {0} doit avoir un Account ERPNext pour le solde initial").format(
+                special.row.nature_operations
+            )
+        )
+
+    target_account = _get_caisse_account(doc.caisse)
+    amount = flt(doc.montant_reference or doc.montant)
+
+    return _make_internal_transfer(
+        source_account=source_account,
+        target_account=target_account,
+        paid_amount=amount,
+        received_amount=amount,
+        posting_date=doc.date,
+        reference_no=doc.name,
+        detail=special.row,
+        remarks=_("Solde initial LS Tréso {0}").format(doc.name),
+    )
+
+
+def _get_default_uom():
+    if frappe.db.exists("UOM", "Nos"):
+        return "Nos"
+    return frappe.db.get_value("UOM", {}, "name", order_by="creation asc")
+
+
+def _get_company(doc, invoice_rows=None):
+    if invoice_rows:
+        return invoice_rows[0].invoice.company
+    if frappe.db.exists("Company", doc.societe):
+        return doc.societe
+
+    caisse_account = frappe.db.get_value("Caisse", doc.caisse, "compte_comptable")
+    company = frappe.db.get_value("Account", caisse_account, "company") if caisse_account else None
+    if company:
+        return company
+
+    frappe.throw(
+        _("Impossible de déterminer la Company ERPNext pour l'opération {0}").format(doc.name)
+    )
+
+
+def set_operation_totals(doc):
+    advance_total = sum(flt(d.allocated_amount) for d in (doc.advance_allocation or []))
+    doc.montant_avances_utilisees = advance_total
+    doc.montant_total_operation = flt(doc.montant) + advance_total
+
+    detail_total = sum(flt(d.montant_devise) for d in doc.details_operation_de_caisse)
+    if flt(detail_total, 2) != flt(doc.montant_total_operation, 2):
+        frappe.throw(
+            _("Le total des détails {0} doit être égal au montant total de l'opération {1}").format(
+                detail_total, doc.montant_total_operation
+            )
+        )
+
+
+def create_missing_invoices(doc):
+    """Create one invoice for all normal detail rows that do not already have one."""
+    config = get_operation_config(doc)
+    missing_rows = []
+    parties = set()
+
+    for row in doc.details_operation_de_caisse:
+        nature = _get_nature_flags(row)
+        row.document_type = config.invoice_doctype
+        row.type_tiers = config.detail_tiers_type
+
+        if nature.echange or nature.solde_initial:
+            if row.invoice:
+                frappe.throw(
+                    _("Ligne {0}: une opération d'échange ou de solde initial ne peut pas être liée à une facture").format(row.idx)
+                )
+            continue
+
+        if nature.is_advance:
+            if row.invoice:
+                frappe.throw(
+                    _("Ligne {0}: une nature Avance ne peut pas être liée à une facture").format(row.idx)
+                )
+            if row.tiers:
+                parties.add(_get_erpnext_party(row.tiers, config))
+            continue
+
+        if row.invoice:
+            invoice = frappe.get_doc(config.invoice_doctype, row.invoice)
+            if invoice.docstatus != 1:
+                frappe.throw(_("La facture {0} doit être soumise").format(row.invoice))
+            invoice_party = invoice.get(config.party_field)
+            parties.add(invoice_party)
+            if row.tiers and _get_erpnext_party(row.tiers, config) != invoice_party:
+                frappe.throw(
+                    _("Ligne {0}: le tiers ne correspond pas à la facture {1}").format(
+                        row.idx, row.invoice
+                    )
+                )
+            continue
+
+        party = _get_erpnext_party(row.tiers, config)
+        parties.add(party)
+        missing_rows.append(row)
+
+    if len(parties) > 1:
+        frappe.throw(_("Une opération LS Tréso ne peut concerner qu'un seul tiers"))
+
+    if not missing_rows:
+        return
+
+    party = next(iter(parties), None)
+    if not party:
+        frappe.throw(_("Veuillez renseigner le tiers pour créer la facture"))
+
+    company = _get_company(doc)
+    invoice = frappe.new_doc(config.invoice_doctype)
+    invoice.company = company
+    invoice.posting_date = doc.date
+    invoice.due_date = doc.date
+    invoice.set(config.party_field, party)
+
+    if doc.get("devise") and frappe.db.exists("Currency", doc.devise):
+        invoice.currency = doc.devise
+
+    uom = _get_default_uom()
+    if not uom:
+        frappe.throw(_("Aucune UOM n'est configurée dans ERPNext"))
+
+    parent_dimension_values = {}
+
+    for row in missing_rows:
+        nature = frappe.get_doc("Nature Operations", row.nature_operations)
+        account = nature.compte_comptable
+        if not account or not frappe.db.exists("Account", account):
+            frappe.throw(
+                _("La nature {0} doit être liée directement à un Account ERPNext").format(
+                    row.nature_operations
+                )
+            )
+
+        item_values = {
+            "item_name": nature.nature or row.nature_operations,
+            "description": nature.nature or row.nature_operations,
+            "qty": 1,
+            "uom": uom,
+            "stock_uom": uom,
+            "conversion_factor": 1,
+            "rate": flt(row.montant_devise),
+            config.account_field: account,
+        }
+        dimensions = _get_dimension_values_from_detail(row, config.item_doctype)
+        item_values.update(dimensions)
+        invoice.append("items", item_values)
+
+        for fieldname, value in dimensions.items():
+            parent_dimension_values.setdefault(fieldname, set()).add(value)
+
+    # Populate invoice-level dimension only when every line carries the same value.
+    invoice_meta = frappe.get_meta(config.invoice_doctype)
+    item_meta = frappe.get_meta(config.item_doctype)
+    for item_fieldname, values in parent_dimension_values.items():
+        if len(values) != 1:
+            continue
+        item_df = item_meta.get_field(item_fieldname)
+        if not item_df:
+            continue
+        parent_fieldname = _find_dimension_field(invoice_meta, item_df.options)
+        if parent_fieldname:
+            invoice.set(parent_fieldname, next(iter(values)))
+
+    # Sales Invoice Item requires a Cost Center. Use Company default when it was not supplied.
+    default_cost_center = frappe.db.get_value("Company", company, "cost_center")
+    if default_cost_center:
+        for item in invoice.items:
+            if item.meta.get_field("cost_center") and not item.cost_center:
+                item.cost_center = default_cost_center
+
+    invoice.remarks = _("Créée automatiquement depuis {0} {1}").format(doc.doctype, doc.name)
+    invoice.insert()
+    invoice.submit()
+
+    for row in missing_rows:
+        row.invoice = invoice.name
+        row.document_type = config.invoice_doctype
+
+
+def get_invoice_rows(doc, validate_outstanding=True):
+    config = get_operation_config(doc)
+    amounts = {}
+    order = []
+    new_advance_amount = 0
+
+    for row in doc.details_operation_de_caisse:
+        nature = _get_nature_flags(row)
+        if nature.echange or nature.solde_initial:
+            if row.invoice:
+                frappe.throw(
+                    _("Ligne {0}: une opération d'échange ou de solde initial ne peut pas être liée à une facture").format(row.idx)
+                )
+            continue
+
+        if nature.is_advance:
+            if row.invoice:
+                frappe.throw(
+                    _("Ligne {0}: une nature Avance ne peut pas être liée à une facture").format(row.idx)
+                )
+            new_advance_amount += flt(row.montant_devise)
+            continue
+
+        if row.document_type != config.invoice_doctype:
+            frappe.throw(
+                _("Ligne {0}: cette opération ne peut contenir que des {1}").format(
+                    row.idx, config.invoice_doctype
+                )
+            )
+        if not row.invoice:
+            frappe.throw(_("Ligne {0}: aucune facture n'a pu être rattachée").format(row.idx))
+
+        if row.invoice not in amounts:
+            amounts[row.invoice] = 0
+            order.append(row.invoice)
+        amounts[row.invoice] += flt(row.montant_devise)
+
+    invoice_rows = []
+    party = None
+    company = None
+
+    for name in order:
+        invoice = frappe.get_doc(config.invoice_doctype, name)
+        if invoice.docstatus != 1:
+            frappe.throw(_("La facture {0} doit être soumise").format(name))
+
+        invoice_party = invoice.get(config.party_field)
+        if party and invoice_party != party:
+            frappe.throw(_("Toutes les factures doivent appartenir au même tiers"))
+        if company and invoice.company != company:
+            frappe.throw(_("Toutes les factures doivent appartenir à la même société"))
+
+        party = party or invoice_party
+        company = company or invoice.company
+
+        if validate_outstanding and flt(amounts[name], 2) > flt(invoice.outstanding_amount, 2):
+            frappe.throw(
+                _("Le montant {0} dépasse le solde disponible de la facture {1} ({2})").format(
+                    amounts[name], name, invoice.outstanding_amount
+                )
+            )
+
+        invoice_rows.append(frappe._dict({"name": name, "amount": amounts[name], "invoice": invoice}))
+
+    return invoice_rows, new_advance_amount, party, company
+
+
+def get_advance_distribution(doc, invoice_rows, party=None, company=None, check_available=True):
+    config = get_operation_config(doc)
+    remaining_by_invoice = {d.name: flt(d.amount) for d in invoice_rows}
+    distribution = []
+    seen = set()
+
+    for row in doc.advance_allocation or []:
+        if not row.payment_entry or flt(row.allocated_amount) <= 0:
+            continue
+        if row.payment_entry in seen:
+            frappe.throw(
+                _("Le Payment Entry {0} ne doit apparaître qu'une seule fois dans les avances").format(
+                    row.payment_entry
+                )
+            )
+        seen.add(row.payment_entry)
+
+        payment = frappe.get_doc("Payment Entry", row.payment_entry)
+        if (
+            payment.docstatus != 1
+            or payment.payment_type != config.payment_type
+            or payment.party_type != config.party_doctype
+        ):
+            frappe.throw(_("Le Payment Entry {0} n'est pas une avance valide").format(row.payment_entry))
+        if party and payment.party != party:
+            frappe.throw(_("Le Payment Entry {0} appartient à un autre tiers").format(row.payment_entry))
+        if company and payment.company != company:
+            frappe.throw(_("Le Payment Entry {0} appartient à une autre société").format(row.payment_entry))
+
+        available = flt(payment.unallocated_amount)
+        row.available_amount = available
+        if check_available and flt(row.allocated_amount, 2) > flt(available, 2):
+            frappe.throw(
+                _("Le montant alloué sur {0} dépasse le montant disponible {1}").format(
+                    row.payment_entry, available
+                )
+            )
+
+        remaining = flt(row.allocated_amount)
+        allocations = []
+        for invoice in invoice_rows:
+            if remaining <= 0:
+                break
+            available_on_invoice = flt(remaining_by_invoice.get(invoice.name))
+            if available_on_invoice <= 0:
+                continue
+            amount = min(remaining, available_on_invoice)
+            allocations.append(frappe._dict({"invoice": invoice.name, "amount": amount}))
+            remaining_by_invoice[invoice.name] = available_on_invoice - amount
+            remaining -= amount
+
+        if flt(remaining, 2) > 0:
+            frappe.throw(_("Le montant des avances dépasse le montant des factures à régler"))
+
+        distribution.append(
+            frappe._dict({"row": row, "payment": payment, "allocations": allocations})
+        )
+
+    return distribution
+
+
+def prepare_operation(doc):
+    set_operation_totals(doc)
+    if get_special_operation(doc):
+        return
+    create_missing_invoices(doc)
+    get_invoice_rows(doc)
+
+
+def make_payment_entry(doc):
+    if doc.flags.get("skip_ls_treso_payment_entry"):
+        return
+
+    if flt(doc.montant) <= 0:
+        return
+
+    special = get_special_operation(doc)
+    if special:
+        if special.nature.echange:
+            # The cash transfer creates one PE only, from the source Decaissement.
+            if doc.doctype == "Decaissement":
+                return make_internal_transfer_payment_entry(doc)
+            return
+        if special.nature.solde_initial:
+            return _make_opening_balance_payment_entry(doc, special)
+
+    config = get_operation_config(doc)
+    caisse_account = _get_caisse_account(doc.caisse)
+
+    invoice_rows, new_advance_amount, party, company = get_invoice_rows(doc)
+    distribution = get_advance_distribution(doc, invoice_rows, party, company)
+
+    advance_by_invoice = {}
+    for advance in distribution:
+        for allocation in advance.allocations:
+            advance_by_invoice[allocation.invoice] = (
+                flt(advance_by_invoice.get(allocation.invoice)) + flt(allocation.amount)
+            )
+
+    allocations = {}
+    for invoice in invoice_rows:
+        amount = flt(invoice.amount) - flt(advance_by_invoice.get(invoice.name))
+        if amount > 0:
+            allocations[invoice.name] = amount
+
+    current_allocated = sum(allocations.values())
+    if flt(current_allocated + new_advance_amount, 2) != flt(doc.montant, 2):
+        frappe.throw(_("Le montant courant ne correspond pas aux factures et aux nouvelles avances"))
+
+    if invoice_rows:
+        pe = get_payment_entry(
+            config.invoice_doctype,
+            invoice_rows[0].name,
+            party_amount=flt(doc.montant),
+            bank_account=caisse_account,
+            bank_amount=flt(doc.montant_reference or doc.montant),
+            payment_type=config.payment_type,
+            reference_date=doc.date,
+        )
+        pe.set("references", [])
+    else:
+        detail_tiers = next((d.tiers for d in doc.details_operation_de_caisse if d.tiers), None)
+        party = _get_erpnext_party(detail_tiers, config)
+        company = _get_company(doc)
+        pe = frappe.new_doc("Payment Entry")
+        pe.payment_type = config.payment_type
+        pe.company = company
+        pe.party_type = config.party_doctype
+        pe.party = party
+        if config.payment_type == "Receive":
+            pe.paid_from = get_party_account(config.party_doctype, party, company)
+            pe.paid_to = caisse_account
+        else:
+            pe.paid_from = caisse_account
+            pe.paid_to = get_party_account(config.party_doctype, party, company)
+
+    for invoice_name, amount in allocations.items():
+        pe.append(
+            "references",
+            {
+                "reference_doctype": config.invoice_doctype,
+                "reference_name": invoice_name,
+                "allocated_amount": amount,
+            },
+        )
+
+    pe.posting_date = doc.date
+    pe.reference_no = doc.name
+    pe.reference_date = doc.date
+    pe.remarks = _("{0} LS Tréso {1}").format(doc.doctype, doc.name)
+
+    if config.payment_type == "Receive":
+        pe.paid_amount = flt(doc.montant)
+        pe.received_amount = flt(doc.montant_reference or doc.montant)
+    else:
+        pe.paid_amount = flt(doc.montant_reference or doc.montant)
+        pe.received_amount = flt(doc.montant)
+
+    pe.submit()
+
+
+def reconcile_advances(doc):
+    if not doc.advance_allocation or get_special_operation(doc):
+        return
+
+    config = get_operation_config(doc)
+    invoice_rows, _, party, company = get_invoice_rows(doc, validate_outstanding=False)
+    distribution = get_advance_distribution(doc, invoice_rows, party, company)
+
+    for advance in distribution:
+        if not advance.allocations:
+            continue
+
+        payment_doc = advance.payment
+        recon = frappe.new_doc("Payment Reconciliation")
+        recon.company = payment_doc.company
+        recon.party_type = config.party_doctype
+        recon.party = payment_doc.party
+        recon.receivable_payable_account = (
+            payment_doc.paid_from if config.payment_type == "Receive" else payment_doc.paid_to
+        )
+        recon.payment_name = payment_doc.name
+        recon.get_unreconciled_entries()
+
+        payment = next(
+            (
+                d
+                for d in recon.payments
+                if d.reference_type == "Payment Entry" and d.reference_name == payment_doc.name
+            ),
+            None,
+        )
+        if not payment:
+            frappe.throw(_("Le Payment Entry {0} n'a plus de montant disponible").format(payment_doc.name))
+
+        allocated_total = sum(flt(d.amount) for d in advance.allocations)
+        if flt(allocated_total, 2) > flt(payment.amount, 2):
+            frappe.throw(
+                _("Le montant alloué dépasse le montant disponible du Payment Entry {0}").format(
+                    payment_doc.name
+                )
+            )
+
+        payment.unreconciled_amount = flt(payment.amount)
+        exchange_map = recon.get_invoice_exchange_map(recon.invoices, [payment])
+        remaining_payment = flt(payment.amount)
+
+        for allocation in advance.allocations:
+            if frappe.db.exists(
+                "Payment Entry Reference",
+                {
+                    "parent": payment_doc.name,
+                    "reference_doctype": config.invoice_doctype,
+                    "reference_name": allocation.invoice,
+                    "docstatus": 1,
+                },
+            ):
+                frappe.throw(
+                    _("Le Payment Entry {0} est déjà rapproché avec {1}").format(
+                        payment_doc.name, allocation.invoice
+                    )
+                )
+
+            invoice = next(
+                (
+                    d
+                    for d in recon.invoices
+                    if d.invoice_type == config.invoice_doctype
+                    and d.invoice_number == allocation.invoice
+                ),
+                None,
+            )
+            if not invoice or flt(allocation.amount, 2) > flt(invoice.outstanding_amount, 2):
+                frappe.throw(
+                    _("Impossible de rapprocher {0} avec la facture {1}").format(
+                        payment_doc.name, allocation.invoice
+                    )
+                )
+
+            payment.amount = remaining_payment
+            invoice.exchange_rate = exchange_map.get(invoice.invoice_number)
+            row = recon.get_allocated_entry(payment, invoice, flt(allocation.amount))
+            row.unreconciled_amount = payment.unreconciled_amount
+            row.difference_amount = recon.get_difference_amount(payment, invoice, flt(allocation.amount))
+            row.difference_account = frappe.db.get_value(
+                "Company", payment_doc.company, "exchange_gain_loss_account"
+            )
+            row.exchange_rate = invoice.exchange_rate
+            row.gain_loss_posting_date = doc.date
+            recon.append("allocation", row)
+            remaining_payment -= flt(allocation.amount)
+
+        recon.reconcile()
+
+
+def unreconcile_advances(doc):
+    if not doc.advance_allocation:
+        return
+
+    from erpnext.accounts.doctype.unreconcile_payment.unreconcile_payment import (
+        create_unreconcile_doc_for_selection,
+    )
+
+    config = get_operation_config(doc)
+    invoice_rows, _, party, company = get_invoice_rows(doc, validate_outstanding=False)
+    distribution = get_advance_distribution(
+        doc, invoice_rows, party, company, check_available=False
+    )
+    selections = []
+
+    for advance in distribution:
+        for allocation in advance.allocations:
+            selections.append(
+                {
+                    "company": advance.payment.company,
+                    "voucher_type": "Payment Entry",
+                    "voucher_no": advance.payment.name,
+                    "against_voucher_type": config.invoice_doctype,
+                    "against_voucher_no": allocation.invoice,
+                }
+            )
+
+    if selections:
+        create_unreconcile_doc_for_selection(json.dumps(selections))
+
+
+def cancel_payment_entry(doc):
+    name = frappe.db.get_value(
+        "Payment Entry", {"reference_no": doc.name, "docstatus": 1}, "name"
+    )
+    if name:
+        frappe.get_doc("Payment Entry", name).cancel()
