@@ -9,6 +9,7 @@
   "payment_entry",
   "document_type",
   "invoice",
+  "invoices",
   "available_amount",
   "allocated_amount"
  ],
@@ -22,14 +23,18 @@
   {
    "fieldname": "document_type",
    "fieldtype": "Select",
+   "hidden": 1,
    "label": "Document Type",
-   "options": "Sales Invoice\nPurchase Invoice"
+   "options": "Sales Invoice\nPurchase Invoice",
+   "read_only": 1
   },
   {
    "fieldname": "invoice",
    "fieldtype": "Dynamic Link",
+   "hidden": 1,
    "label": "Invoice",
-   "options": "document_type"
+   "options": "document_type",
+   "read_only": 1
   },
   {
    "fieldname": "available_amount",
@@ -40,12 +45,18 @@
    "fieldname": "allocated_amount",
    "fieldtype": "Currency",
    "label": "Montant Allou\u00e9"
+  },
+  {
+   "fieldname": "invoices",
+   "fieldtype": "Long Text",
+   "label": "Invoices",
+   "read_only": 1
   }
  ],
  "index_web_pages_for_search": 1,
  "istable": 1,
  "links": [],
- "modified": "2026-08-08 17:06:44.255268",
+ "modified": "2026-08-10 12:49:05.473927",
  "modified_by": "Administrator",
  "module": "Ls Treso",
  "name": "Advance Allocation",
