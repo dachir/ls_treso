@@ -126,12 +126,13 @@ frappe.ui.form.on('Caisse Initialisation', {
 							label: 'Montant',
 							fieldname: 'montant_de',
 							fieldtype: 'Data',
-							//default: "1000",
-							onchange: function(e) {
-								//cur_dialog.set_value('devise_a','USD');
-								const mt = flt(cur_dialog.get_value('montant_de'));
-								if(mt > 0) {
-									frm.events.cours(cur_dialog.get_value('devise_de'),cur_dialog.get_value('devise_a'));
+							onchange: function() {
+								const mt = flt(d.get_value('montant_de'));
+								if (d.get_value('tiers')) {
+									d.set_value('devise_a', d.get_value('devise_de'));
+									d.set_value('montant_a', mt);
+								} else if (mt > 0 && d.get_value('caisse_a')) {
+									frm.events.cours(d.get_value('devise_de'), d.get_value('devise_a'));
 								}
 							}
 						},
@@ -140,16 +141,34 @@ frappe.ui.form.on('Caisse Initialisation', {
 							fieldtype: "Column Break"
 						},
 						{
+							label: 'Salarié',
+							fieldname: 'tiers',
+							fieldtype: 'Link',
+							options: 'Tiers',
+							get_query: function() {
+								return { filters: { type: 'SALARIE' } };
+							},
+							onchange: function() {
+								if (d.get_value('tiers')) {
+									d.set_value('caisse_a', '');
+									d.set_value('devise_a', d.get_value('devise_de'));
+									d.set_value('montant_a', flt(d.get_value('montant_de')));
+								}
+							}
+						},
+						{
 							label: 'A: ',
 							fieldname: 'caisse_a',
 							fieldtype: 'Link',
 							options: "Caisse",
-							onchange: function(e) {
-								//cur_dialog.set_value('devise_a','USD');
-								frm.events.devise(cur_dialog.get_value('caisse_a'));
-								const mt = flt(cur_dialog.get_value('montant_de'));
-								if(mt > 0) {
-									frm.events.cours(cur_dialog.get_value('devise_de'),cur_dialog.get_value('devise_a'));
+							onchange: function() {
+								if (d.get_value('caisse_a')) {
+									d.set_value('tiers', '');
+									frm.events.devise(d.get_value('caisse_a'));
+									const mt = flt(d.get_value('montant_de'));
+									if (mt > 0) {
+										frm.events.cours(d.get_value('devise_de'), d.get_value('devise_a'));
+									}
 								}
 							}
 						},
@@ -177,11 +196,16 @@ frappe.ui.form.on('Caisse Initialisation', {
 					],
 					primary_action_label: __('Transférer'),
 					primary_action(values) {
+						if (!values.caisse_a && !values.tiers) {
+							frappe.msgprint(__('Veuillez sélectionner une caisse destination ou un salarié.'));
+							return;
+						}
 						frappe.call({
 							method: 'ls_treso.ls_treso.doctype.caisse_initialisation.caisse_initialisation.save_operation',
 							args: {
 								caisse_de : values.caisse_de,
 								caisse_a : values.caisse_a,
+								tiers : values.tiers,
 								date : values.date_de,
 								montant_de : values.montant_de,
 								montant_a : values.montant_a,

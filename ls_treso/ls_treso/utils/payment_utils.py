@@ -249,17 +249,47 @@ def get_special_operation(doc):
     return frappe._dict({"row": row, "nature": nature})
 
 
+def _set_payment_dimension(payment_entry, fieldname, value):
+    if not fieldname or not value:
+        return
+
+    current_value = payment_entry.get(fieldname)
+    if current_value and current_value != value:
+        frappe.throw(
+            _("La dimension {0} contient deux valeurs différentes: {1} et {2}").format(
+                fieldname, current_value, value
+            )
+        )
+
+    payment_entry.set(fieldname, value)
+
+
 def _apply_special_dimensions(payment_entry, detail):
-    """Copy Nature + LS analytical imputations to Payment Entry when representable."""
+    """Copy Nature, analytical imputations and employee/tiers dimensions when representable."""
     pe_meta = frappe.get_meta("Payment Entry")
 
     nature_field = _find_dimension_field(pe_meta, "Nature Operations")
     if nature_field and detail.nature_operations:
-        payment_entry.set(nature_field, detail.nature_operations)
+        _set_payment_dimension(payment_entry, nature_field, detail.nature_operations)
 
     for fieldname, value in _get_dimension_values_from_detail(detail, "Payment Entry").items():
         if pe_meta.has_field(fieldname):
-            payment_entry.set(fieldname, value)
+            _set_payment_dimension(payment_entry, fieldname, value)
+
+    # Employee cash transfers keep the LS Tiers on the generated movements.
+    # If Tiers and/or Employee are configured as Accounting Dimensions on
+    # Payment Entry, populate them without changing the Internal Transfer party logic.
+    if detail.tiers:
+        tiers_doc = frappe.get_doc("Tiers", detail.tiers)
+
+        tiers_field = _find_dimension_field(pe_meta, "Tiers")
+        if tiers_field:
+            _set_payment_dimension(payment_entry, tiers_field, tiers_doc.name)
+
+        if tiers_doc.type == "SALARIE" and tiers_doc.code and frappe.db.exists("Employee", tiers_doc.code):
+            employee_field = _find_dimension_field(pe_meta, "Employee")
+            if employee_field:
+                _set_payment_dimension(payment_entry, employee_field, tiers_doc.code)
 
 
 def _get_caisse_account(caisse):
