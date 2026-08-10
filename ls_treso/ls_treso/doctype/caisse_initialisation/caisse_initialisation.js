@@ -137,10 +137,6 @@ frappe.ui.form.on('Caisse Initialisation', {
 							}
 						},
 						{
-							fieldname: "column_break_01",
-							fieldtype: "Column Break"
-						},
-						{
 							label: 'Salarié',
 							fieldname: 'tiers',
 							fieldtype: 'Link',
@@ -156,6 +152,11 @@ frappe.ui.form.on('Caisse Initialisation', {
 								}
 							}
 						},
+						{
+							fieldname: "column_break_01",
+							fieldtype: "Column Break"
+						},
+						
 						{
 							label: 'A: ',
 							fieldname: 'caisse_a',
