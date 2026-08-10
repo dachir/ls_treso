@@ -22,7 +22,9 @@
   "column_break_9",
   "retour_caisse",
   "column_break_10",
-  "echange"
+  "echange",
+  "column_break_fiacm",
+  "is_advance"
  ],
  "fields": [
   {
@@ -116,11 +118,21 @@
    "fieldname": "est_valide",
    "fieldtype": "Check",
    "label": "Actif"
+  },
+  {
+   "fieldname": "column_break_fiacm",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "0",
+   "fieldname": "is_advance",
+   "fieldtype": "Check",
+   "label": "Avance"
   }
  ],
  "index_web_pages_for_search": 1,
  "links": [],
- "modified": "2023-09-04 22:35:06.166544",
+ "modified": "2026-08-10 10:33:54.272294",
  "modified_by": "Administrator",
  "module": "Ls Treso",
  "name": "Nature Operations",
