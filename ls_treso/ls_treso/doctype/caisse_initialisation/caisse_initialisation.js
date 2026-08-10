@@ -146,8 +146,6 @@ frappe.ui.form.on('Caisse Initialisation', {
 							},
 							onchange: function() {
 								if (d.get_value('tiers')) {
-									d.set_value('caisse_a', '');
-									d.set_value('devise_a', d.get_value('devise_de'));
 									d.set_value('montant_a', flt(d.get_value('montant_de')));
 								}
 							}
@@ -164,7 +162,6 @@ frappe.ui.form.on('Caisse Initialisation', {
 							options: "Caisse",
 							onchange: function() {
 								if (d.get_value('caisse_a')) {
-									d.set_value('tiers', '');
 									frm.events.devise(d.get_value('caisse_a'));
 									const mt = flt(d.get_value('montant_de'));
 									if (mt > 0) {
@@ -197,8 +194,8 @@ frappe.ui.form.on('Caisse Initialisation', {
 					],
 					primary_action_label: __('Transférer'),
 					primary_action(values) {
-						if (!values.caisse_a && !values.tiers) {
-							frappe.msgprint(__('Veuillez sélectionner une caisse destination ou un salarié.'));
+						if (!values.caisse_a) {
+							frappe.msgprint(__('Veuillez sélectionner une caisse destination.'));
 							return;
 						}
 						frappe.call({

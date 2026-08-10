@@ -276,20 +276,16 @@ def _apply_special_dimensions(payment_entry, detail):
         if pe_meta.has_field(fieldname):
             _set_payment_dimension(payment_entry, fieldname, value)
 
-    # Employee cash transfers keep the LS Tiers on the generated movements.
-    # If Tiers and/or Employee are configured as Accounting Dimensions on
-    # Payment Entry, populate them without changing the Internal Transfer party logic.
+    # For a cash transfer carrying an LS Tiers, copy it directly to the
+    # Payment Entry fields when they exist. Internal Transfer keeps no party.
     if detail.tiers:
         tiers_doc = frappe.get_doc("Tiers", detail.tiers)
 
-        tiers_field = _find_dimension_field(pe_meta, "Tiers")
-        if tiers_field:
-            _set_payment_dimension(payment_entry, tiers_field, tiers_doc.name)
+        if pe_meta.has_field("tiers"):
+            _set_payment_dimension(payment_entry, "tiers", tiers_doc.name)
 
-        if tiers_doc.type == "SALARIE" and tiers_doc.code and frappe.db.exists("Employee", tiers_doc.code):
-            employee_field = _find_dimension_field(pe_meta, "Employee")
-            if employee_field:
-                _set_payment_dimension(payment_entry, employee_field, tiers_doc.code)
+        if tiers_doc.type == "SALARIE" and tiers_doc.code and pe_meta.has_field("employee"):
+            _set_payment_dimension(payment_entry, "employee", tiers_doc.code)
 
 
 def _get_caisse_account(caisse):
