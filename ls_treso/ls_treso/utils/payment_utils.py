@@ -23,6 +23,7 @@ _OPERATION_CONFIG = {
         "detail_tiers_type": "Client",
         "payment_type": "Receive",
         "account_field": "income_account",
+        "party_account_field": "debit_to",
     }),
     "Decaissement": frappe._dict({
         "invoice_doctype": "Purchase Invoice",
@@ -33,6 +34,7 @@ _OPERATION_CONFIG = {
         "detail_tiers_type": "Fournisseur",
         "payment_type": "Pay",
         "account_field": "expense_account",
+        "party_account_field": "credit_to",
     }),
 }
 
@@ -295,6 +297,72 @@ def _get_caisse_account(caisse):
     return account
 
 
+def _get_party_account_currency(invoice, config):
+    account = invoice.get(config.party_account_field)
+    currency = frappe.db.get_value("Account", account, "account_currency") if account else None
+    if not currency:
+        frappe.throw(
+            _("Impossible de déterminer la devise du compte tiers de la facture {0}").format(
+                invoice.name
+            )
+        )
+    return currency
+
+
+def _detail_amount_in_currency(doc, row, target_currency):
+    """Return the detail amount in either the operation currency or the cash-account currency."""
+    if target_currency == doc.devise:
+        return flt(row.montant_devise)
+
+    if target_currency == doc.devise_caisse:
+        return flt(row.montant_devise_ref)
+
+    frappe.throw(
+        _(
+            "La devise {0} n'est ni la devise de l'opération ({1}) ni la devise de la caisse ({2})"
+        ).format(target_currency, doc.devise, doc.devise_caisse)
+    )
+
+
+def _operation_amount_in_currency(doc, target_currency):
+    if target_currency == doc.devise:
+        return flt(doc.montant)
+
+    if target_currency == doc.devise_caisse:
+        return flt(doc.montant_reference)
+
+    frappe.throw(
+        _(
+            "La devise {0} n'est ni la devise de l'opération ({1}) ni la devise de la caisse ({2})"
+        ).format(target_currency, doc.devise, doc.devise_caisse)
+    )
+
+
+def _advance_amount_in_operation_currency(doc, row):
+    """Advance Allocation.amount is in the selected Payment Entry party-account currency."""
+    payment = frappe.get_doc("Payment Entry", row.payment_entry)
+    payment_currency = (
+        payment.paid_from_account_currency
+        if payment.payment_type == "Receive"
+        else payment.paid_to_account_currency
+    )
+
+    amount = flt(row.allocated_amount)
+    if payment_currency == doc.devise:
+        return amount
+
+    if payment_currency == doc.devise_caisse:
+        if not flt(doc.cours):
+            frappe.throw(_("Le cours de change est requis pour convertir les avances"))
+        return amount * flt(doc.cours)
+
+    frappe.throw(
+        _(
+            "La devise de l'avance {0} ({1}) n'est pas compatible avec l'opération"
+        ).format(row.payment_entry, payment_currency)
+    )
+
+
 def _make_internal_transfer(
     source_account,
     target_account,
@@ -417,7 +485,11 @@ def _get_company(doc, invoice_rows=None):
 
 
 def set_operation_totals(doc):
-    advance_total = sum(flt(d.allocated_amount) for d in (doc.advance_allocation or []))
+    advance_total = 0
+    for row in doc.advance_allocation or []:
+        if row.payment_entry and flt(row.allocated_amount):
+            advance_total += _advance_amount_in_operation_currency(doc, row)
+
     doc.montant_avances_utilisees = advance_total
     doc.montant_total_operation = flt(doc.montant) + advance_total
 
@@ -559,9 +631,9 @@ def create_missing_invoices(doc):
 
 def get_invoice_rows(doc, validate_outstanding=True):
     config = get_operation_config(doc)
-    amounts = {}
+    rows_by_invoice = {}
     order = []
-    new_advance_amount = 0
+    advance_rows = []
 
     for row in doc.details_operation_de_caisse:
         nature = _get_nature_flags(row)
@@ -577,7 +649,7 @@ def get_invoice_rows(doc, validate_outstanding=True):
                 frappe.throw(
                     _("Ligne {0}: une nature Avance ne peut pas être liée à une facture").format(row.idx)
                 )
-            new_advance_amount += flt(row.montant_devise)
+            advance_rows.append(row)
             continue
 
         if row.document_type != config.invoice_doctype:
@@ -589,14 +661,15 @@ def get_invoice_rows(doc, validate_outstanding=True):
         if not row.invoice:
             frappe.throw(_("Ligne {0}: aucune facture n'a pu être rattachée").format(row.idx))
 
-        if row.invoice not in amounts:
-            amounts[row.invoice] = 0
+        if row.invoice not in rows_by_invoice:
+            rows_by_invoice[row.invoice] = []
             order.append(row.invoice)
-        amounts[row.invoice] += flt(row.montant_devise)
+        rows_by_invoice[row.invoice].append(row)
 
     invoice_rows = []
     party = None
     company = None
+    party_currency = None
 
     for name in order:
         invoice = frappe.get_doc(config.invoice_doctype, name)
@@ -604,24 +677,67 @@ def get_invoice_rows(doc, validate_outstanding=True):
             frappe.throw(_("La facture {0} doit être soumise").format(name))
 
         invoice_party = invoice.get(config.party_field)
+        invoice_party_currency = _get_party_account_currency(invoice, config)
+
         if party and invoice_party != party:
             frappe.throw(_("Toutes les factures doivent appartenir au même tiers"))
         if company and invoice.company != company:
             frappe.throw(_("Toutes les factures doivent appartenir à la même société"))
+        if party_currency and invoice_party_currency != party_currency:
+            frappe.throw(_("Toutes les factures doivent utiliser le même compte tiers / devise"))
 
         party = party or invoice_party
         company = company or invoice.company
+        party_currency = party_currency or invoice_party_currency
 
-        if validate_outstanding and flt(amounts[name], 2) > flt(invoice.outstanding_amount, 2):
+        amount = sum(
+            _detail_amount_in_currency(doc, row, party_currency)
+            for row in rows_by_invoice[name]
+        )
+
+        outstanding = flt(invoice.outstanding_amount)
+        if party_currency != invoice.currency:
+            if party_currency == invoice.company_currency:
+                outstanding *= flt(invoice.conversion_rate or 1)
+            else:
+                frappe.throw(
+                    _(
+                        "La devise du compte tiers {0} n'est pas compatible avec la devise de la facture {1}"
+                    ).format(party_currency, invoice.currency)
+                )
+
+        if validate_outstanding and flt(amount, 2) > flt(outstanding, 2):
             frappe.throw(
                 _("Le montant {0} dépasse le solde disponible de la facture {1} ({2})").format(
-                    amounts[name], name, invoice.outstanding_amount
+                    amount, name, outstanding
                 )
             )
 
-        invoice_rows.append(frappe._dict({"name": name, "amount": amounts[name], "invoice": invoice}))
+        invoice_rows.append(
+            frappe._dict(
+                {
+                    "name": name,
+                    "amount": amount,
+                    "invoice": invoice,
+                    "outstanding": outstanding,
+                }
+            )
+        )
 
-    return invoice_rows, new_advance_amount, party, company
+    # An operation containing only a new advance has no invoice from which to infer the party currency.
+    if not party and advance_rows:
+        detail_tiers = next((row.tiers for row in advance_rows if row.tiers), None)
+        party = _get_erpnext_party(detail_tiers, config)
+        company = _get_company(doc)
+        party_account = get_party_account(config.party_doctype, party, company)
+        party_currency = frappe.db.get_value("Account", party_account, "account_currency")
+
+    new_advance_amount = sum(
+        _detail_amount_in_currency(doc, row, party_currency)
+        for row in advance_rows
+    ) if advance_rows else 0
+
+    return invoice_rows, new_advance_amount, party, company, party_currency
 
 
 def get_advance_distribution(doc, invoice_rows, party=None, company=None, check_available=True):
@@ -713,7 +829,7 @@ def make_payment_entry(doc):
     config = get_operation_config(doc)
     caisse_account = _get_caisse_account(doc.caisse)
 
-    invoice_rows, new_advance_amount, party, company = get_invoice_rows(doc)
+    invoice_rows, new_advance_amount, party, company, party_currency = get_invoice_rows(doc)
     distribution = get_advance_distribution(doc, invoice_rows, party, company)
 
     advance_by_invoice = {}
@@ -730,16 +846,21 @@ def make_payment_entry(doc):
             allocations[invoice.name] = amount
 
     current_allocated = sum(allocations.values())
-    if flt(current_allocated + new_advance_amount, 2) != flt(doc.montant, 2):
+    party_amount = flt(current_allocated + new_advance_amount)
+    expected_party_amount = _operation_amount_in_currency(doc, party_currency)
+
+    if flt(party_amount, 2) != flt(expected_party_amount, 2):
         frappe.throw(_("Le montant courant ne correspond pas aux factures et aux nouvelles avances"))
+
+    bank_amount = flt(doc.montant_reference or doc.montant)
 
     if invoice_rows:
         pe = get_payment_entry(
             config.invoice_doctype,
             invoice_rows[0].name,
-            party_amount=flt(doc.montant),
+            party_amount=party_amount,
             bank_account=caisse_account,
-            bank_amount=flt(doc.montant_reference or doc.montant),
+            bank_amount=bank_amount,
             payment_type=config.payment_type,
             reference_date=doc.date,
         )
@@ -748,6 +869,11 @@ def make_payment_entry(doc):
         detail_tiers = next((d.tiers for d in doc.details_operation_de_caisse if d.tiers), None)
         party = _get_erpnext_party(detail_tiers, config)
         company = _get_company(doc)
+        party_account = get_party_account(config.party_doctype, party, company)
+        party_currency = frappe.db.get_value("Account", party_account, "account_currency")
+        party_amount = _operation_amount_in_currency(doc, party_currency)
+        bank_amount = flt(doc.montant_reference or doc.montant)
+
         pe = frappe.new_doc("Payment Entry")
         pe.payment_type = config.payment_type
         pe.company = company
@@ -776,11 +902,11 @@ def make_payment_entry(doc):
     pe.remarks = _("{0} LS Tréso {1}").format(doc.doctype, doc.name)
 
     if config.payment_type == "Receive":
-        pe.paid_amount = flt(doc.montant)
-        pe.received_amount = flt(doc.montant_reference or doc.montant)
+        pe.paid_amount = party_amount
+        pe.received_amount = bank_amount
     else:
-        pe.paid_amount = flt(doc.montant_reference or doc.montant)
-        pe.received_amount = flt(doc.montant)
+        pe.paid_amount = bank_amount
+        pe.received_amount = party_amount
 
     pe.submit()
 
@@ -790,7 +916,7 @@ def reconcile_advances(doc):
         return
 
     config = get_operation_config(doc)
-    invoice_rows, _, party, company = get_invoice_rows(doc, validate_outstanding=False)
+    invoice_rows, _, party, company, _ = get_invoice_rows(doc, validate_outstanding=False)
     distribution = get_advance_distribution(doc, invoice_rows, party, company)
 
     for advance in distribution:
@@ -888,7 +1014,7 @@ def unreconcile_advances(doc):
     )
 
     config = get_operation_config(doc)
-    invoice_rows, _, party, company = get_invoice_rows(doc, validate_outstanding=False)
+    invoice_rows, _, party, company, _ = get_invoice_rows(doc, validate_outstanding=False)
     distribution = get_advance_distribution(
         doc, invoice_rows, party, company, check_available=False
     )

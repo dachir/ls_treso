@@ -254,20 +254,28 @@ def get_last_billetage(caisse, date):
 	#			b2.valeur_initiale = b.valeur_finale
 
 def transfert(caisse_de, caisse_a, montant, devise, caisse_doc, type_operation, skip_payment_entry=False, tiers=None):
+	# Nature Operations utilise le libellé "Décaissement" alors que le DocType
+	# s'appelle "Decaissement". On traduit donc explicitement le type.
+	nature_type = "Décaissement" if type_operation == "Decaissement" else "Encaissement"
+
+	# Prendre uniquement la première Nature du bon type avec Echange activé.
 	nature_doc = frappe.db.sql(
 		"""
 		SELECT name
 		FROM `tabNature Operations`
 		WHERE echange = 1 AND type_operation = %s
-		""", (type_operation),
+		ORDER BY creation ASC
+		LIMIT 1
+		""", (nature_type,),
 		as_dict = 1
 	)
 
 	if not nature_doc:
-		frappe.throw("Veuillez configurer une Nature Operations avec Echange activé pour {}".format(type_operation))
+		frappe.throw(
+			"Veuillez configurer une Nature Operations de type {} avec Echange activé".format(nature_type)
+		)
 
 	if len(caisse_doc) > 0:
-		#if caisse_doc[0].solde_final >= montant :
 		detail = {
 			"nature_operations": nature_doc[0].name,
 			"montant_devise": montant,
@@ -298,9 +306,12 @@ def transfert(caisse_de, caisse_a, montant, devise, caisse_doc, type_operation, 
 		op_doc.submit()
 		return op_doc
 
+
 @frappe.whitelist()
 def save_operation(caisse_de, caisse_a=None, date=None, montant_de=0, montant_a=0, devise=None, tiers=None):
-	#frappe.msgprint("1")
+	save_point = "ls_treso_cash_transfer"
+	frappe.db.savepoint(save_point)
+
 	try:
 		if not caisse_a:
 			frappe.throw("Veuillez sélectionner une caisse destination")
@@ -313,7 +324,7 @@ def save_operation(caisse_de, caisse_a=None, date=None, montant_de=0, montant_a=
 			SELECT name, solde_final, DATE(date_initialisation) AS date_initialisation
 			FROM `tabCaisse Initialisation`
 			WHERE DATE(date_initialisation) = DATE(%s) AND caisse = %s AND docstatus = 0
-			""", (date,caisse_de),
+			""", (date, caisse_de),
 			as_dict = 1
 		)
 
@@ -322,34 +333,56 @@ def save_operation(caisse_de, caisse_a=None, date=None, montant_de=0, montant_a=
 			SELECT name, solde_final, DATE(date_initialisation) AS date_initialisation
 			FROM `tabCaisse Initialisation`
 			WHERE DATE(date_initialisation) = DATE(%s) AND caisse = %s AND docstatus = 0
-			""", (date,caisse_a),
+			""", (date, caisse_a),
 			as_dict = 1
 		)
 
-		if len(caisse_doc_de) > 0 :
-			if len(caisse_doc_a) > 0 :
-				use_payment_entry = get_ls_treso_mode() in ACTIVE_MODES
-
-				type_operation = 'Decaissement'
-				decaissement = transfert(
-					caisse_de, caisse_a, montant_de, devise, caisse_doc_de, type_operation, use_payment_entry, tiers
-				)
-
-				type_operation = 'Encaissement'
-				encaissement = transfert(
-					caisse_a, caisse_de, montant_a, devise, caisse_doc_a, type_operation, use_payment_entry, tiers
-				)
-
-				if use_payment_entry:
-					make_internal_transfer_payment_entry(decaissement, encaissement)
-			else:
-				frappe.throw("Caisse Réceptrice non ouverte pour cette date")
-		else:
+		if not caisse_doc_de:
 			frappe.throw("Caisse Emétrice non ouverte pour cette date")
-	except Exception as e:
-		frappe.msgprint(str(e))
-		frappe.db.rollback()
 
-	
+		if not caisse_doc_a:
+			frappe.throw("Caisse Réceptrice non ouverte pour cette date")
 
-	
+		use_payment_entry = get_ls_treso_mode() in ACTIVE_MODES
+
+		# 1. Décaissement source avec UNE seule ligne de détail.
+		decaissement = transfert(
+			caisse_de,
+			caisse_a,
+			montant_de,
+			devise,
+			caisse_doc_de,
+			"Decaissement",
+			use_payment_entry,
+			tiers,
+		)
+
+		# 2. Encaissement destination avec UNE seule ligne de détail.
+		encaissement = transfert(
+			caisse_a,
+			caisse_de,
+			montant_a,
+			devise,
+			caisse_doc_a,
+			"Encaissement",
+			use_payment_entry,
+			tiers,
+		)
+
+		# 3. Le Payment Entry Internal Transfer n'est créé qu'après validation
+		#    des deux mouvements LS Tréso.
+		payment_entry = None
+		if use_payment_entry:
+			payment_entry = make_internal_transfer_payment_entry(decaissement, encaissement)
+
+		return {
+			"decaissement": decaissement.name,
+			"encaissement": encaissement.name,
+			"payment_entry": payment_entry.name if payment_entry else None,
+		}
+
+	except Exception:
+		# Les trois documents forment une seule transaction logique.
+		# Si une étape échoue, on annule tout le transfert.
+		frappe.db.rollback(save_point=save_point)
+		raise
