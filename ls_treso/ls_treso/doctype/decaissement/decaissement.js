@@ -465,9 +465,11 @@ frappe.ui.form.on('Details Operation de Caisse', {
 
 		if (row.demande_paiement) frm.call("update_demande", row.demande_paiement, "add");
 	},
-	details_operation_de_caisse_remove:(frm, cdt, cdn) =>{
-		var row = locals[cdt][cdn];
-		if (row.demande_paiement) frm.call("update_demande", row.demande_paiement, "remove");
+	before_details_operation_de_caisse_remove:(frm, cdt, cdn) =>{
+		var row = locals[cdt] && locals[cdt][cdn];
+		if (row && row.demande_paiement) {
+			frm.call("update_demande", row.demande_paiement, "remove");
+		}
 	},
 });
 

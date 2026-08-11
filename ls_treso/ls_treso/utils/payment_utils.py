@@ -8,6 +8,7 @@ from frappe import _
 from frappe.utils import flt
 from erpnext.accounts.doctype.payment_entry.payment_entry import get_payment_entry
 from erpnext.accounts.party import get_party_account
+from erpnext.setup.utils import get_exchange_rate
 
 
 ACTIVE_MODES = ("Standalone", "ERPNext Integrated", "External Export")
@@ -309,18 +310,136 @@ def _get_party_account_currency(invoice, config):
     return currency
 
 
-def _detail_amount_in_currency(doc, row, target_currency):
-    """Return the detail amount in either the operation currency or the cash-account currency."""
+def _get_ls_treso_exchange_rate(from_currency, to_currency, posting_date=None):
+    """Return a multiplier converting from_currency to to_currency from LS Treso rates."""
+    if not from_currency or not to_currency:
+        return None
+    if from_currency == to_currency:
+        return 1.0
+
+    date_filter = " AND date_cours <= %(posting_date)s" if posting_date else ""
+    params = {
+        "from_currency": from_currency,
+        "to_currency": to_currency,
+        "posting_date": posting_date,
+    }
+
+    # Cours Devise stores: parent = reference currency, devise = quoted currency,
+    # cours = quoted/reference. Therefore quoted -> reference uses 1/cours.
+    direct = frappe.db.sql(
+        f"""
+            SELECT cours
+            FROM `tabCours Devise`
+            WHERE parent = %(to_currency)s
+              AND devise = %(from_currency)s
+              {date_filter}
+            ORDER BY date_cours DESC, creation DESC
+            LIMIT 1
+        """,
+        params,
+        as_dict=True,
+    )
+    if direct and flt(direct[0].cours):
+        return 1 / flt(direct[0].cours)
+
+    # Inverse quote: parent = from, devise = to, cours already means to/from.
+    inverse = frappe.db.sql(
+        f"""
+            SELECT cours
+            FROM `tabCours Devise`
+            WHERE parent = %(from_currency)s
+              AND devise = %(to_currency)s
+              {date_filter}
+            ORDER BY date_cours DESC, creation DESC
+            LIMIT 1
+        """,
+        params,
+        as_dict=True,
+    )
+    if inverse and flt(inverse[0].cours):
+        return flt(inverse[0].cours)
+
+    return None
+
+
+def _get_currency_rate(doc, from_currency, to_currency, invoice=None, prefer_invoice=False):
+    """Return multiplier from one currency to another.
+
+    prefer_invoice=True is used for invoice allocations/outstanding values. Payment
+    Entry account rates use the current LS Treso rate first, so real FX differences
+    remain visible instead of being suppressed by the historical invoice rate.
+    """
+    if from_currency == to_currency:
+        return 1.0
+
+    def invoice_rate():
+        if not invoice:
+            return None
+        company_currency = invoice.get("company_currency") or frappe.get_cached_value(
+            "Company", invoice.company, "default_currency"
+        )
+        rate = flt(invoice.get("conversion_rate") or 1)
+        if not rate:
+            return None
+        if from_currency == invoice.currency and to_currency == company_currency:
+            return rate
+        if from_currency == company_currency and to_currency == invoice.currency:
+            return 1 / rate
+        return None
+
+    if prefer_invoice:
+        rate = invoice_rate()
+        if rate:
+            return rate
+
+    # The LS Treso operation carries the exact rate used by the cashier.
+    if doc and flt(doc.cours):
+        if from_currency == doc.devise and to_currency == doc.devise_caisse:
+            return 1 / flt(doc.cours)
+        if from_currency == doc.devise_caisse and to_currency == doc.devise:
+            return flt(doc.cours)
+
+    rate = _get_ls_treso_exchange_rate(from_currency, to_currency, getattr(doc, "date", None))
+    if rate:
+        return rate
+
+    if not prefer_invoice:
+        rate = invoice_rate()
+        if rate:
+            return rate
+
+    # Last fallback to ERPNext's native exchange-rate resolver.
+    rate = flt(get_exchange_rate(from_currency, to_currency, getattr(doc, "date", None)))
+    return rate or None
+
+
+def _convert_amount(doc, amount, from_currency, to_currency, invoice=None):
+    amount = flt(amount)
+    if from_currency == to_currency:
+        return amount
+
+    rate = _get_currency_rate(
+        doc, from_currency, to_currency, invoice=invoice, prefer_invoice=bool(invoice)
+    )
+    if not rate:
+        frappe.throw(
+            _("Aucun taux de change disponible pour convertir {0} vers {1}").format(
+                from_currency, to_currency
+            )
+        )
+    return amount * rate
+
+
+def _detail_amount_in_currency(doc, row, target_currency, invoice=None):
+    """Return a detail amount in the currency expected by the party account."""
     if target_currency == doc.devise:
         return flt(row.montant_devise)
 
-    if target_currency == doc.devise_caisse:
+    if target_currency == doc.devise_caisse and flt(row.montant_devise_ref):
         return flt(row.montant_devise_ref)
 
-    frappe.throw(
-        _(
-            "La devise {0} n'est ni la devise de l'opération ({1}) ni la devise de la caisse ({2})"
-        ).format(target_currency, doc.devise, doc.devise_caisse)
+    return _convert_amount(
+        doc, flt(row.montant_devise), doc.devise, target_currency, invoice=invoice
     )
 
 
@@ -328,14 +447,10 @@ def _operation_amount_in_currency(doc, target_currency):
     if target_currency == doc.devise:
         return flt(doc.montant)
 
-    if target_currency == doc.devise_caisse:
+    if target_currency == doc.devise_caisse and flt(doc.montant_reference):
         return flt(doc.montant_reference)
 
-    frappe.throw(
-        _(
-            "La devise {0} n'est ni la devise de l'opération ({1}) ni la devise de la caisse ({2})"
-        ).format(target_currency, doc.devise, doc.devise_caisse)
-    )
+    return _convert_amount(doc, flt(doc.montant), doc.devise, target_currency)
 
 
 def _advance_amount_in_operation_currency(doc, row):
@@ -346,20 +461,8 @@ def _advance_amount_in_operation_currency(doc, row):
         if payment.payment_type == "Receive"
         else payment.paid_to_account_currency
     )
-
-    amount = flt(row.allocated_amount)
-    if payment_currency == doc.devise:
-        return amount
-
-    if payment_currency == doc.devise_caisse:
-        if not flt(doc.cours):
-            frappe.throw(_("Le cours de change est requis pour convertir les avances"))
-        return amount * flt(doc.cours)
-
-    frappe.throw(
-        _(
-            "La devise de l'avance {0} ({1}) n'est pas compatible avec l'opération"
-        ).format(row.payment_entry, payment_currency)
+    return _convert_amount(
+        doc, flt(row.allocated_amount), payment_currency, doc.devise
     )
 
 
@@ -574,6 +677,18 @@ def create_missing_invoices(doc):
     if doc.get("devise") and frappe.db.exists("Currency", doc.devise):
         invoice.currency = doc.devise
 
+    company_currency = frappe.get_cached_value("Company", company, "default_currency")
+    if invoice.currency and company_currency and invoice.currency != company_currency:
+        invoice.conversion_rate = _get_currency_rate(
+            doc, invoice.currency, company_currency
+        )
+        if not flt(invoice.conversion_rate):
+            frappe.throw(
+                _("Aucun taux de change disponible pour créer la facture en {0} (Company: {1})").format(
+                    invoice.currency, company_currency
+                )
+            )
+
     uom = _get_default_uom()
     if not uom:
         frappe.throw(_("Aucune UOM n'est configurée dans ERPNext"))
@@ -698,7 +813,7 @@ def get_invoice_rows(doc, validate_outstanding=True):
         party_currency = party_currency or invoice_party_currency
 
         amount = sum(
-            _detail_amount_in_currency(doc, row, party_currency)
+            _detail_amount_in_currency(doc, row, party_currency, invoice=invoice)
             for row in rows_by_invoice[name]
         )
 
@@ -859,7 +974,8 @@ def make_payment_entry(doc):
     if flt(party_amount, 2) != flt(expected_party_amount, 2):
         frappe.throw(_("Le montant courant ne correspond pas aux factures et aux nouvelles avances"))
 
-    bank_amount = flt(doc.montant_reference or doc.montant)
+    caisse_currency = frappe.db.get_value("Account", caisse_account, "account_currency")
+    bank_amount = _operation_amount_in_currency(doc, caisse_currency)
 
     if invoice_rows:
         pe = get_payment_entry(
@@ -879,7 +995,7 @@ def make_payment_entry(doc):
         party_account = get_party_account(config.party_doctype, party, company)
         party_currency = frappe.db.get_value("Account", party_account, "account_currency")
         party_amount = _operation_amount_in_currency(doc, party_currency)
-        bank_amount = flt(doc.montant_reference or doc.montant)
+        bank_amount = _operation_amount_in_currency(doc, caisse_currency)
 
         pe = frappe.new_doc("Payment Entry")
         pe.payment_type = config.payment_type
@@ -908,16 +1024,23 @@ def make_payment_entry(doc):
     pe.reference_date = doc.date
     pe.remarks = _("{0} LS Tréso {1}").format(doc.doctype, doc.name)
 
-    # get_payment_entry() initializes exchange rates using its own posting date.
-    # Rebuild them after applying the LS Tréso posting date. For a single invoice,
-    # use that invoice as the reference so an account in the invoice currency uses
-    # the invoice conversion rate instead of creating an artificial FX difference.
-    pe.source_exchange_rate = 0
-    pe.target_exchange_rate = 0
-    if len(invoice_rows) == 1:
-        pe.set_exchange_rate(invoice_rows[0].invoice)
-    else:
-        pe.set_exchange_rate()
+    # Use the rate carried by LS Treso for the current cash movement whenever
+    # possible. This keeps Payment Entry exchange rates consistent with the
+    # operation instead of silently using a different ERPNext rate.
+    company_currency = frappe.get_cached_value("Company", pe.company, "default_currency")
+    pe.paid_from_account_currency = pe.paid_from_account_currency or frappe.db.get_value(
+        "Account", pe.paid_from, "account_currency"
+    )
+    pe.paid_to_account_currency = pe.paid_to_account_currency or frappe.db.get_value(
+        "Account", pe.paid_to, "account_currency"
+    )
+    reference_invoice = invoice_rows[0].invoice if len(invoice_rows) == 1 else None
+    pe.source_exchange_rate = _get_currency_rate(
+        doc, pe.paid_from_account_currency, company_currency, invoice=reference_invoice
+    )
+    pe.target_exchange_rate = _get_currency_rate(
+        doc, pe.paid_to_account_currency, company_currency, invoice=reference_invoice
+    )
 
     if config.payment_type == "Receive":
         pe.paid_amount = party_amount
