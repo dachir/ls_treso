@@ -16,6 +16,7 @@
   "tiers",
   "justifiable",
   "famille",
+  "item",
   "est_valide",
   "section_break_8",
   "solde_initial",
@@ -128,11 +129,17 @@
    "fieldname": "is_advance",
    "fieldtype": "Check",
    "label": "Avance"
+  },
+  {
+   "fieldname": "item",
+   "fieldtype": "Link",
+   "label": "Article",
+   "options": "Item"
   }
  ],
  "index_web_pages_for_search": 1,
  "links": [],
- "modified": "2026-08-10 13:17:59.746518",
+ "modified": "2026-08-12 09:22:27.247246",
  "modified_by": "Administrator",
  "module": "Ls Treso",
  "name": "Nature Operations",
