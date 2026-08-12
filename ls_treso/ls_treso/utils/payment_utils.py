@@ -131,6 +131,33 @@ def _append_nature_description(item, nature):
         item.description = f"{current}\n{extra}" if current else extra
 
 
+def _get_invoice_item_for_nature(nature):
+    """Return the Item linked to the Nature, or the LS Tréso default Item."""
+    if nature.item:
+        return nature.item
+
+    if nature.type_operation == "Encaissement":
+        setting_field = "encaissement_item"
+    elif nature.type_operation in ("Décaissement", "Decaissement"):
+        setting_field = "decaissement_item"
+    else:
+        frappe.throw(
+            _("Type d'opération non reconnu pour la nature {0}: {1}").format(
+                nature.name, nature.type_operation
+            )
+        )
+
+    item_code = frappe.db.get_single_value("LS Treso Settings", setting_field)
+    if not item_code:
+        frappe.throw(
+            _("La nature {0} n'a pas d'Article et aucun Article par défaut n'est configuré dans LS Treso Settings ({1})").format(
+                nature.name, setting_field
+            )
+        )
+
+    return item_code
+
+
 def _get_invoice_dimension_value(invoice, dimension_doctype):
     fieldname = _find_dimension_field(invoice.meta, dimension_doctype)
     if fieldname and invoice.get(fieldname):
@@ -753,17 +780,12 @@ def create_missing_invoices(doc):
     # the standard Item defaults (UOM, income/expense account, etc.).
     for row in missing_rows:
         nature = frappe.get_doc("Nature Operations", row.nature_operations)
-        if not nature.item or not frappe.db.exists("Item", nature.item):
-            frappe.throw(
-                _("La nature {0} doit être liée à un Article ERPNext pour créer une facture").format(
-                    row.nature_operations
-                )
-            )
+        item_code = _get_invoice_item_for_nature(nature)
 
         item = invoice.append(
             "items",
             {
-                "item_code": nature.item,
+                "item_code": item_code,
                 "qty": 1,
                 "rate": flt(row.montant_devise),
             },

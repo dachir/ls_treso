@@ -7,7 +7,11 @@
  "editable_grid": 1,
  "engine": "InnoDB",
  "field_order": [
-  "operating_mode"
+  "operating_mode",
+  "articles_section",
+  "encaissement_item",
+  "column_break_4yzzq",
+  "decaissement_item"
  ],
  "fields": [
   {
@@ -15,12 +19,33 @@
    "fieldtype": "Select",
    "label": "Operation Mode",
    "options": "Standalone\nERPNext Integrated\nExternal Export"
+  },
+  {
+   "fieldname": "articles_section",
+   "fieldtype": "Section Break",
+   "label": "Articles"
+  },
+  {
+   "fieldname": "encaissement_item",
+   "fieldtype": "Link",
+   "label": "Encaissement",
+   "options": "Item"
+  },
+  {
+   "fieldname": "column_break_4yzzq",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "decaissement_item",
+   "fieldtype": "Link",
+   "label": "Decaissement",
+   "options": "Item"
   }
  ],
  "index_web_pages_for_search": 1,
  "issingle": 1,
  "links": [],
- "modified": "2026-08-08 16:20:22.845502",
+ "modified": "2026-08-12 10:31:23.504786",
  "modified_by": "Administrator",
  "module": "Ls Treso",
  "name": "LS Treso Settings",
