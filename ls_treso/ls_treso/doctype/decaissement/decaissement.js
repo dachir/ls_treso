@@ -58,6 +58,10 @@ function load_invoice_details(frm, cdt, cdn) {
 			frappe.model.set_value(cdt, cdn, "type_tiers", r.message.type_tiers || "");
 			frappe.model.set_value(cdt, cdn, "tiers", r.message.tiers || "");
 
+			if (r.message.nature_operations) {
+				frappe.model.set_value(cdt, cdn, "nature_operations", r.message.nature_operations);
+			}
+
 			for (let i = 1; i <= 10; i++) {
 				let fieldname = i === 1 ? "imputation_analytique" : `imputation_analytique_${i}`;
 				frappe.model.set_value(cdt, cdn, fieldname, r.message[fieldname] || "");

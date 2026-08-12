@@ -541,15 +541,26 @@ class Encaissement(Document):
 
 	def validate_nature(self):
 		for d in self.get("details_operation_de_caisse"):
-			justifiable = frappe.db.get_value("Nature Operations", d.nature_operations, "justifiable")
-			if justifiable == "Oui":
-				if not (d.imputation_analytique):
-					frappe.throw(_("Ligne {0}: Veuillez renseigner la nature analytique").format(d.idx))
+			nature = frappe.db.get_value(
+				"Nature Operations",
+				d.nature_operations,
+				["justifiable", "tiers", "echange", "solde_initial"],
+				as_dict=True,
+			)
 
-			tiers = frappe.db.get_value("Nature Operations", d.nature_operations, "tiers")
-			if tiers == "Oui":
-				if not (d.tiers):
-					frappe.throw(_("Ligne {0}: Veuillez renseigner le tiers").format(d.idx))
+			if not nature:
+				continue
+
+			# Echange et Solde initial sont des opérations spéciales sans facture.
+			# Elles ne doivent pas hériter des obligations analytiques/tiers des lignes normales.
+			if nature.echange or nature.solde_initial:
+				continue
+
+			if nature.justifiable == "Oui" and not d.imputation_analytique:
+				frappe.throw(_("Ligne {0}: Veuillez renseigner la nature analytique").format(d.idx))
+
+			if nature.tiers == "Oui" and not d.tiers:
+				frappe.throw(_("Ligne {0}: Veuillez renseigner le tiers").format(d.idx))
 
 
 

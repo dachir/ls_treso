@@ -79,6 +79,58 @@ def _find_dimension_field(meta, dimension_doctype):
     return None
 
 
+def _get_accounting_dimension_field(dimension_doctype):
+    """Return the ERPNext Accounting Dimension fieldname for a DocType, if configured."""
+    if not dimension_doctype or not frappe.db.exists("DocType", "Accounting Dimension"):
+        return None
+
+    return frappe.db.get_value(
+        "Accounting Dimension",
+        {"document_type": dimension_doctype, "disabled": 0},
+        "fieldname",
+    )
+
+
+def _get_invoice_nature(invoice):
+    """Return a single LS Nature from custom_nature/dimension when unambiguous."""
+    values = set()
+
+    if invoice.meta.has_field("custom_nature") and invoice.get("custom_nature"):
+        values.add(invoice.get("custom_nature"))
+
+    dimension_field = _get_accounting_dimension_field("Nature Operations")
+    if dimension_field and invoice.meta.has_field(dimension_field) and invoice.get(dimension_field):
+        values.add(invoice.get(dimension_field))
+
+    for item in invoice.get("items") or []:
+        if item.meta.has_field("custom_nature") and item.get("custom_nature"):
+            values.add(item.get("custom_nature"))
+        if dimension_field and item.meta.has_field(dimension_field) and item.get(dimension_field):
+            values.add(item.get(dimension_field))
+
+    return next(iter(values)) if len(values) == 1 else None
+
+
+def _set_invoice_nature(item, nature_name):
+    """Always use custom_nature when available and also populate the configured dimension."""
+    if item.meta.has_field("custom_nature"):
+        item.set("custom_nature", nature_name)
+
+    dimension_field = _get_accounting_dimension_field("Nature Operations")
+    if dimension_field and item.meta.has_field(dimension_field):
+        item.set(dimension_field, nature_name)
+
+
+def _append_nature_description(item, nature):
+    """Keep the Item description and append the LS Nature description/name."""
+    nature_description = nature.get("description") or nature.nature or nature.name
+    current = (item.description or "").strip()
+    extra = (nature_description or "").strip()
+
+    if extra and extra not in current:
+        item.description = f"{current}\n{extra}" if current else extra
+
+
 def _get_invoice_dimension_value(invoice, dimension_doctype):
     fieldname = _find_dimension_field(invoice.meta, dimension_doctype)
     if fieldname and invoice.get(fieldname):
@@ -139,6 +191,10 @@ def get_invoice_details(document_type, invoice, societe=None):
         "type_tiers": config.detail_tiers_type,
         "tiers": tiers or "",
     }
+
+    nature = _get_invoice_nature(invoice_doc)
+    if nature:
+        result["nature_operations"] = nature
 
     axes = frappe.get_all(
         "Axe Analytique",
@@ -689,42 +745,61 @@ def create_missing_invoices(doc):
                 )
             )
 
-    uom = _get_default_uom()
-    if not uom:
-        frappe.throw(_("Aucune UOM n'est configurée dans ERPNext"))
-
     parent_dimension_values = {}
+    row_item_pairs = []
+    nature_values = set()
 
+    # Create invoice lines from the Item linked to each Nature. ERPNext then fills
+    # the standard Item defaults (UOM, income/expense account, etc.).
     for row in missing_rows:
         nature = frappe.get_doc("Nature Operations", row.nature_operations)
-        account = nature.compte_comptable
-        if not account or not frappe.db.exists("Account", account):
+        if not nature.item or not frappe.db.exists("Item", nature.item):
             frappe.throw(
-                _("La nature {0} doit être liée directement à un Account ERPNext").format(
+                _("La nature {0} doit être liée à un Article ERPNext pour créer une facture").format(
                     row.nature_operations
                 )
             )
 
-        item_values = {
-            "item_name": nature.nature or row.nature_operations,
-            "description": nature.nature or row.nature_operations,
-            "qty": 1,
-            "uom": uom,
-            "stock_uom": uom,
-            "conversion_factor": 1,
-            "rate": flt(row.montant_devise),
-            config.account_field: account,
-        }
-        dimensions = _get_dimension_values_from_detail(row, config.item_doctype)
-        item_values.update(dimensions)
-        invoice.append("items", item_values)
+        item = invoice.append(
+            "items",
+            {
+                "item_code": nature.item,
+                "qty": 1,
+                "rate": flt(row.montant_devise),
+            },
+        )
+        row_item_pairs.append((row, nature, item))
+        nature_values.add(row.nature_operations)
 
+    # Use ERPNext's native Item logic instead of reproducing account/UOM defaults in LS Tréso.
+    invoice.set_missing_values()
+
+    for row, nature, item in row_item_pairs:
+        # The LS amount remains authoritative even if the Item has a price list.
+        item.qty = 1
+        item.rate = flt(row.montant_devise)
+
+        _append_nature_description(item, nature)
+        _set_invoice_nature(item, row.nature_operations)
+
+        dimensions = _get_dimension_values_from_detail(row, config.item_doctype)
         for fieldname, value in dimensions.items():
+            item.set(fieldname, value)
             parent_dimension_values.setdefault(fieldname, set()).add(value)
 
-    # Populate invoice-level dimension only when every line carries the same value.
+    # Compatibility: if the invoice itself has custom_nature, populate it only
+    # when all lines share one Nature. The item-level field remains authoritative.
     invoice_meta = frappe.get_meta(config.invoice_doctype)
     item_meta = frappe.get_meta(config.item_doctype)
+    if len(nature_values) == 1:
+        nature_name = next(iter(nature_values))
+        if invoice_meta.has_field("custom_nature"):
+            invoice.set("custom_nature", nature_name)
+        dimension_field = _get_accounting_dimension_field("Nature Operations")
+        if dimension_field and invoice_meta.has_field(dimension_field):
+            invoice.set(dimension_field, nature_name)
+
+    # Populate invoice-level analytical dimensions only when every line carries the same value.
     for item_fieldname, values in parent_dimension_values.items():
         if len(values) != 1:
             continue
@@ -817,31 +892,14 @@ def get_invoice_rows(doc, validate_outstanding=True):
             for row in rows_by_invoice[name]
         )
 
-        outstanding = flt(invoice.outstanding_amount)
-        if party_currency != invoice.currency:
-            if party_currency == invoice.company_currency:
-                outstanding *= flt(invoice.conversion_rate or 1)
-            else:
-                frappe.throw(
-                    _(
-                        "La devise du compte tiers {0} n'est pas compatible avec la devise de la facture {1}"
-                    ).format(party_currency, invoice.currency)
-                )
-
-        if validate_outstanding and flt(amount, 2) > flt(outstanding, 2):
-            frappe.throw(
-                _("Le montant {0} dépasse le solde disponible de la facture {1} ({2})").format(
-                    amount, name, outstanding
-                )
-            )
-
+        # Do not reproduce ERPNext's outstanding validation here. Payment Entry
+        # recalculates the current outstanding in the party-account currency at submit time.
         invoice_rows.append(
             frappe._dict(
                 {
                     "name": name,
                     "amount": amount,
                     "invoice": invoice,
-                    "outstanding": outstanding,
                 }
             )
         )
