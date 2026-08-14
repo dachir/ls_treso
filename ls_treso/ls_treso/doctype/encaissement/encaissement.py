@@ -44,9 +44,17 @@ class Encaissement(Document):
 		mode = get_ls_treso_mode()
 
 		if mode in ACTIVE_MODES:
-			prepare_operation(self)
-			make_payment_entry(self)
-			reconcile_advances(self)
+			# Invoice creation and Payment Entry must remain atomic. If the payment
+			# fails, rollback the automatically created invoice as well.
+			save_point = "ls_treso_encaissement_accounting"
+			frappe.db.savepoint(save_point)
+			try:
+				prepare_operation(self)
+				make_payment_entry(self)
+				reconcile_advances(self)
+			except Exception:
+				frappe.db.rollback(save_point=save_point)
+				raise
 		else:
 			total = 0.00
 			for details in self.details_operation_de_caisse:

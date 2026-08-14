@@ -163,7 +163,13 @@ frappe.ui.form.on('Decaissement', {
 			};
 		});
 
-		frm.set_query("invoice", "details_operation_de_caisse", function() {
+		frm.set_query("invoice", "details_operation_de_caisse", function(doc, cdt, cdn) {
+			// Decaissement must always point to Purchase Invoice. Do not filter by
+			// invoice currency: a CDF cashbox may settle USD or CDF supplier invoices.
+			let row = locals[cdt] && locals[cdt][cdn];
+			if (row && row.document_type !== "Purchase Invoice") {
+				row.document_type = "Purchase Invoice";
+			}
 			return {
 				filters: {
 					docstatus: 1,
@@ -428,6 +434,13 @@ frappe.ui.form.on('Decaissement', {
 });
 
 frappe.ui.form.on('Details Operation de Caisse', {
+
+	form_render(frm, cdt, cdn) {
+		let row = locals[cdt] && locals[cdt][cdn];
+		if (frm.doctype === "Decaissement" && row && row.document_type !== "Purchase Invoice") {
+			frappe.model.set_value(cdt, cdn, "document_type", "Purchase Invoice");
+		}
+	},
 	
 	invoice(frm, cdt, cdn) {
 		load_invoice_details(frm, cdt, cdn);

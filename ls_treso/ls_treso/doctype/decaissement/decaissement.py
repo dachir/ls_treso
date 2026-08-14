@@ -78,9 +78,17 @@ class Decaissement(Document):
 				frappe.throw("Le montant actuellement en caisse ne permet pas de faire cette opération.\n Il faut augmenter le solde!!!")
 
 		if mode in ACTIVE_MODES:
-			prepare_operation(self)
-			make_payment_entry(self)
-			reconcile_advances(self)
+			# Invoice creation and Payment Entry must remain atomic. If the payment
+			# fails, rollback the automatically created invoice as well.
+			save_point = "ls_treso_decaissement_accounting"
+			frappe.db.savepoint(save_point)
+			try:
+				prepare_operation(self)
+				make_payment_entry(self)
+				reconcile_advances(self)
+			except Exception:
+				frappe.db.rollback(save_point=save_point)
+				raise
 		else:
 			total = 0.00
 			for details in self.details_operation_de_caisse:

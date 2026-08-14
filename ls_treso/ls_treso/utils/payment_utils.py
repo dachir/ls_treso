@@ -568,6 +568,43 @@ def _make_internal_transfer(
     if source_account == target_account:
         frappe.throw(_("Le compte source et le compte destination doivent être différents"))
 
+    paid_amount = flt(paid_amount)
+    received_amount = flt(received_amount)
+    if paid_amount <= 0 or received_amount <= 0:
+        frappe.throw(_("Les montants du transfert doivent être supérieurs à zéro"))
+
+    company_currency = frappe.get_cached_value("Company", source_company, "default_currency")
+    source_currency = frappe.db.get_value("Account", source_account, "account_currency")
+    target_currency = frappe.db.get_value("Account", target_account, "account_currency")
+
+    if not source_currency or not target_currency:
+        frappe.throw(_("Impossible de déterminer la devise des comptes du transfert"))
+
+    # The amounts entered in the transfer dialog are authoritative. Build rates
+    # that make both sides of the Internal Transfer represent the same base
+    # amount. This is especially important for USD -> CDF cash transfers.
+    if source_currency == company_currency:
+        source_rate = 1.0
+        base_amount = paid_amount
+        target_rate = base_amount / received_amount
+    elif target_currency == company_currency:
+        target_rate = 1.0
+        base_amount = received_amount
+        source_rate = base_amount / paid_amount
+    else:
+        source_rate = (
+            _get_ls_treso_exchange_rate(source_currency, company_currency, posting_date)
+            or flt(get_exchange_rate(source_currency, company_currency, posting_date))
+        )
+        if not source_rate:
+            frappe.throw(
+                _("Aucun taux de change disponible pour convertir {0} vers {1}").format(
+                    source_currency, company_currency
+                )
+            )
+        base_amount = paid_amount * source_rate
+        target_rate = base_amount / received_amount
+
     pe = frappe.new_doc("Payment Entry")
     pe.payment_type = "Internal Transfer"
     pe.company = source_company
@@ -576,8 +613,12 @@ def _make_internal_transfer(
     pe.reference_date = posting_date
     pe.paid_from = source_account
     pe.paid_to = target_account
-    pe.paid_amount = flt(paid_amount)
-    pe.received_amount = flt(received_amount)
+    pe.paid_from_account_currency = source_currency
+    pe.paid_to_account_currency = target_currency
+    pe.source_exchange_rate = source_rate
+    pe.target_exchange_rate = target_rate
+    pe.paid_amount = paid_amount
+    pe.received_amount = received_amount
     pe.remarks = remarks or _("Transfert LS Tréso {0}").format(reference_no)
 
     _apply_special_dimensions(pe, detail)
@@ -909,8 +950,12 @@ def get_invoice_rows(doc, validate_outstanding=True):
         company = company or invoice.company
         party_currency = party_currency or invoice_party_currency
 
+        # The detail amount is the current cash movement amount. Convert it with
+        # the LS Tréso/current operation rate, not the historical invoice rate.
+        # ERPNext will handle the invoice exchange difference itself when the
+        # Payment Entry is submitted.
         amount = sum(
-            _detail_amount_in_currency(doc, row, party_currency, invoice=invoice)
+            _detail_amount_in_currency(doc, row, party_currency)
             for row in rows_by_invoice[name]
         )
 
@@ -1051,8 +1096,13 @@ def make_payment_entry(doc):
     party_amount = flt(current_allocated + new_advance_amount)
     expected_party_amount = _operation_amount_in_currency(doc, party_currency)
 
-    if flt(party_amount, 2) != flt(expected_party_amount, 2):
-        frappe.throw(_("Le montant courant ne correspond pas aux factures et aux nouvelles avances"))
+    # The detail total was already validated in the operation currency by
+    # set_operation_totals(). Here we only guard against a material conversion
+    # difference; tiny FX/rounding differences are left to ERPNext.
+    if abs(flt(party_amount) - flt(expected_party_amount)) > 0.01:
+        frappe.throw(
+            _("Le montant courant ne correspond pas aux factures et aux nouvelles avances")
+        )
 
     caisse_currency = frappe.db.get_value("Account", caisse_account, "account_currency")
     bank_amount = _operation_amount_in_currency(doc, caisse_currency)
@@ -1130,6 +1180,7 @@ def make_payment_entry(doc):
         pe.received_amount = party_amount
 
     pe.submit()
+    return pe
 
 
 def reconcile_advances(doc):
