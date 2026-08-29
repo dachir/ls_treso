@@ -79,25 +79,6 @@ frappe.ui.form.on('Decaissement', {
 				}
 			};
 		});
-
-		frm.set_query("invoice", "details_operation_de_caisse", function(doc, cdt, cdn) {
-			let row = locals[cdt] && locals[cdt][cdn];
-
-			if (row && row.type_tiers === "Employe") {
-				return {
-					filters: {
-						name: ["=", ""]
-					}
-				};
-			}
-
-			return {
-				filters: {
-					docstatus: 1,
-					outstanding_amount: [">", 0]
-				}
-			};
-		});
 		
 
 		frm.set_query("nature_operations","details_operation_de_caisse", function() {
@@ -186,6 +167,9 @@ frappe.ui.form.on('Decaissement', {
 			// Decaissement must always point to Purchase Invoice. Do not filter by
 			// invoice currency: a CDF cashbox may settle USD or CDF supplier invoices.
 			let row = locals[cdt] && locals[cdt][cdn];
+			if (row && row.type_tiers === "Employe") {
+				return { filters: { name: ["=", ""] } };
+			}
 			if (row && row.document_type !== "Purchase Invoice") {
 				row.document_type = "Purchase Invoice";
 			}
@@ -454,18 +438,17 @@ frappe.ui.form.on('Decaissement', {
 
 frappe.ui.form.on('Details Operation de Caisse', {
 
+	type_tiers(frm, cdt, cdn) {
+		let row = locals[cdt][cdn];
+		if (row.type_tiers === "Employe" && row.invoice) {
+			frappe.model.set_value(cdt, cdn, "invoice", "");
+		}
+	},
+
 	form_render(frm, cdt, cdn) {
 		let row = locals[cdt] && locals[cdt][cdn];
 		if (frm.doctype === "Decaissement" && row && row.document_type !== "Purchase Invoice") {
 			frappe.model.set_value(cdt, cdn, "document_type", "Purchase Invoice");
-		}
-	},
-
-	type_tiers(frm, cdt, cdn) {
-		let row = locals[cdt][cdn];
-
-		if (row.type_tiers === "Employe" && row.invoice) {
-			frappe.model.set_value(cdt, cdn, "invoice", "");
 		}
 	},
 	

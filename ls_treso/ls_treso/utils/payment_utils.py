@@ -738,9 +738,11 @@ def create_missing_invoices(doc):
     for row in doc.details_operation_de_caisse:
         nature = _get_nature_flags(row)
 
-        # Un employé est payé directement par Payment Entry, sans facture.
         if row.type_tiers == "Employe":
-            row.invoice = None
+            if row.invoice:
+                frappe.throw(
+                    _("Ligne {0}: un employé ne peut pas être lié à une facture").format(row.idx)
+                )
             continue
 
         row.document_type = config.invoice_doctype
@@ -903,7 +905,7 @@ def get_invoice_rows(doc, validate_outstanding=True):
 
     for row in doc.details_operation_de_caisse:
         nature = _get_nature_flags(row)
-        
+
         if row.type_tiers == "Employe":
             if row.invoice:
                 frappe.throw(
@@ -1100,13 +1102,12 @@ def make_payment_entry(doc):
         new_advance_amount = 0
         party = employee_row.tiers
         company = _get_company(doc)
-
-        party_account = get_party_account("Employee", party, company)
-        party_currency = frappe.db.get_value(
-            "Account", party_account, "account_currency"
-        )
+        party_type = "Employee"
+        party_account = get_party_account(party_type, party, company)
+        party_currency = frappe.db.get_value("Account", party_account, "account_currency")
     else:
         invoice_rows, new_advance_amount, party, company, party_currency = get_invoice_rows(doc)
+        party_type = config.party_doctype
 
     distribution = get_advance_distribution(doc, invoice_rows, party, company)
 
@@ -1124,13 +1125,12 @@ def make_payment_entry(doc):
             allocations[invoice.name] = amount
 
     current_allocated = sum(allocations.values())
+    expected_party_amount = _operation_amount_in_currency(doc, party_currency)
     party_amount = (
-        _operation_amount_in_currency(doc, party_currency)
+        expected_party_amount
         if employee_row
         else flt(current_allocated + new_advance_amount)
     )
-
-    expected_party_amount = _operation_amount_in_currency(doc, party_currency)
 
     # The detail total was already validated in the operation currency by
     # set_operation_totals(). Here we only guard against a material conversion
@@ -1156,18 +1156,11 @@ def make_payment_entry(doc):
         pe.set("references", [])
     else:
         if not employee_row:
-            detail_tiers = next(
-                (d.tiers for d in doc.details_operation_de_caisse if d.tiers),
-                None,
-            )
+            detail_tiers = next((d.tiers for d in doc.details_operation_de_caisse if d.tiers), None)
             party = _get_erpnext_party(detail_tiers, config)
             company = _get_company(doc)
-            party_account = get_party_account(config.party_doctype, party, company)
-            party_currency = frappe.db.get_value(
-                "Account", party_account, "account_currency"
-            )
-
-        party_type = "Employee" if employee_row else config.party_doctype
+            party_account = get_party_account(party_type, party, company)
+            party_currency = frappe.db.get_value("Account", party_account, "account_currency")
 
         party_amount = _operation_amount_in_currency(doc, party_currency)
         bank_amount = _operation_amount_in_currency(doc, caisse_currency)
@@ -1177,7 +1170,6 @@ def make_payment_entry(doc):
         pe.company = company
         pe.party_type = party_type
         pe.party = party
-
         if config.payment_type == "Receive":
             pe.paid_from = get_party_account(party_type, party, company)
             pe.paid_to = caisse_account

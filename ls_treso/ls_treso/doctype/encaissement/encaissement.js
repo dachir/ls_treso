@@ -80,25 +80,6 @@ frappe.ui.form.on('Encaissement', {
 			};
 		});
 
-		frm.set_query("invoice", "details_operation_de_caisse", function(doc, cdt, cdn) {
-			let row = locals[cdt] && locals[cdt][cdn];
-
-			if (row && row.type_tiers === "Employe") {
-				return {
-					filters: {
-						name: ["=", ""]
-					}
-				};
-			}
-
-			return {
-				filters: {
-					docstatus: 1,
-					outstanding_amount: [">", 0]
-				}
-			};
-		});
-
 		frm.set_query("nature_operations","details_operation_de_caisse", function() {
 			return {
 				"filters": {
@@ -181,7 +162,12 @@ frappe.ui.form.on('Encaissement', {
 			};
 		});
 
-		frm.set_query("invoice", "details_operation_de_caisse", function() {
+		frm.set_query("invoice", "details_operation_de_caisse", function(doc, cdt, cdn) {
+			let row = locals[cdt] && locals[cdt][cdn];
+			if (row && row.type_tiers === "Employe") {
+				return { filters: { name: ["=", ""] } };
+			}
+
 			return {
 				filters: {
 					docstatus: 1,
@@ -281,16 +267,16 @@ frappe.ui.form.on('Encaissement', {
 });
 
 frappe.ui.form.on('Details Operation de Caisse', {
-	
-	invoice(frm, cdt, cdn) {
-		load_invoice_details(frm, cdt, cdn);
-	},
+
 	type_tiers(frm, cdt, cdn) {
 		let row = locals[cdt][cdn];
-
 		if (row.type_tiers === "Employe" && row.invoice) {
 			frappe.model.set_value(cdt, cdn, "invoice", "");
 		}
+	},
+	
+	invoice(frm, cdt, cdn) {
+		load_invoice_details(frm, cdt, cdn);
 	},
     montant_devise(frm, cdt, cdn) {
 		var row = locals[cdt][cdn];
