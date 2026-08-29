@@ -737,6 +737,12 @@ def create_missing_invoices(doc):
 
     for row in doc.details_operation_de_caisse:
         nature = _get_nature_flags(row)
+
+        # Un employé est payé directement par Payment Entry, sans facture.
+        if row.type_tiers == "Employe":
+            row.invoice = None
+            continue
+
         row.document_type = config.invoice_doctype
         row.type_tiers = config.detail_tiers_type
 
@@ -897,6 +903,14 @@ def get_invoice_rows(doc, validate_outstanding=True):
 
     for row in doc.details_operation_de_caisse:
         nature = _get_nature_flags(row)
+        
+        if row.type_tiers == "Employe":
+            if row.invoice:
+                frappe.throw(
+                    _("Ligne {0}: un employé ne peut pas être lié à une facture").format(row.idx)
+                )
+            continue
+
         if nature.echange or nature.solde_initial:
             if row.invoice:
                 frappe.throw(
@@ -1076,7 +1090,24 @@ def make_payment_entry(doc):
     config = get_operation_config(doc)
     caisse_account = _get_caisse_account(doc.caisse)
 
-    invoice_rows, new_advance_amount, party, company, party_currency = get_invoice_rows(doc)
+    employee_row = next(
+        (row for row in doc.details_operation_de_caisse if row.type_tiers == "Employe"),
+        None,
+    )
+
+    if employee_row:
+        invoice_rows = []
+        new_advance_amount = 0
+        party = employee_row.tiers
+        company = _get_company(doc)
+
+        party_account = get_party_account("Employee", party, company)
+        party_currency = frappe.db.get_value(
+            "Account", party_account, "account_currency"
+        )
+    else:
+        invoice_rows, new_advance_amount, party, company, party_currency = get_invoice_rows(doc)
+
     distribution = get_advance_distribution(doc, invoice_rows, party, company)
 
     advance_by_invoice = {}
@@ -1093,7 +1124,12 @@ def make_payment_entry(doc):
             allocations[invoice.name] = amount
 
     current_allocated = sum(allocations.values())
-    party_amount = flt(current_allocated + new_advance_amount)
+    party_amount = (
+        _operation_amount_in_currency(doc, party_currency)
+        if employee_row
+        else flt(current_allocated + new_advance_amount)
+    )
+
     expected_party_amount = _operation_amount_in_currency(doc, party_currency)
 
     # The detail total was already validated in the operation currency by
@@ -1119,25 +1155,35 @@ def make_payment_entry(doc):
         )
         pe.set("references", [])
     else:
-        detail_tiers = next((d.tiers for d in doc.details_operation_de_caisse if d.tiers), None)
-        party = _get_erpnext_party(detail_tiers, config)
-        company = _get_company(doc)
-        party_account = get_party_account(config.party_doctype, party, company)
-        party_currency = frappe.db.get_value("Account", party_account, "account_currency")
+        if not employee_row:
+            detail_tiers = next(
+                (d.tiers for d in doc.details_operation_de_caisse if d.tiers),
+                None,
+            )
+            party = _get_erpnext_party(detail_tiers, config)
+            company = _get_company(doc)
+            party_account = get_party_account(config.party_doctype, party, company)
+            party_currency = frappe.db.get_value(
+                "Account", party_account, "account_currency"
+            )
+
+        party_type = "Employee" if employee_row else config.party_doctype
+
         party_amount = _operation_amount_in_currency(doc, party_currency)
         bank_amount = _operation_amount_in_currency(doc, caisse_currency)
 
         pe = frappe.new_doc("Payment Entry")
         pe.payment_type = config.payment_type
         pe.company = company
-        pe.party_type = config.party_doctype
+        pe.party_type = party_type
         pe.party = party
+
         if config.payment_type == "Receive":
-            pe.paid_from = get_party_account(config.party_doctype, party, company)
+            pe.paid_from = get_party_account(party_type, party, company)
             pe.paid_to = caisse_account
         else:
             pe.paid_from = caisse_account
-            pe.paid_to = get_party_account(config.party_doctype, party, company)
+            pe.paid_to = get_party_account(party_type, party, company)
 
     for invoice_name, amount in allocations.items():
         pe.append(
