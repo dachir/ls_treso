@@ -41,7 +41,7 @@ _OPERATION_CONFIG = {
 
 
 def get_ls_treso_mode():
-    return frappe.db.get_single_value("LS Treso Settings", "operating_mode")
+    return frappe.db.get_single_value("LS Treso Settings", "operating_mode")  or "Standalone"
 
 
 def get_operation_config(doc_or_doctype):
