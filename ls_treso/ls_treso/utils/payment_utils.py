@@ -795,6 +795,8 @@ def create_missing_invoices(doc):
     company = _get_company(doc)
     invoice = frappe.new_doc(config.invoice_doctype)
     invoice.company = company
+    # Preserve the LS Tréso operation date when ERPNext builds the invoice.
+    invoice.set_posting_time = 1
     invoice.posting_date = doc.date
     invoice.set(config.party_field, party)
 
@@ -966,12 +968,13 @@ def get_invoice_rows(doc, validate_outstanding=True):
         company = company or invoice.company
         party_currency = party_currency or invoice_party_currency
 
-        # The detail amount is the current cash movement amount. Convert it with
-        # the LS Tréso/current operation rate, not the historical invoice rate.
-        # ERPNext will handle the invoice exchange difference itself when the
-        # Payment Entry is submitted.
+        # allocated_amount settles the invoice and must therefore use the
+        # invoice/reference rate. The cash side keeps the current LS Tréso rate
+        # below, allowing ERPNext to calculate the real exchange difference.
         amount = sum(
-            _detail_amount_in_currency(doc, row, party_currency)
+            _convert_amount(
+                doc, flt(row.montant_devise), doc.devise, party_currency, invoice=invoice
+            )
             for row in rows_by_invoice[name]
         )
 
