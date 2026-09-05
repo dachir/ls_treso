@@ -1488,23 +1488,27 @@ def _make_auto_invoice_payment_entry(
 
     outstanding_references = (
         get_outstanding_reference_documents(
-            {
-                "posting_date": doc.date,
-                "company": invoice.company,
-                "party_type": config.party_doctype,
-                "payment_type": config.payment_type,
-                "party": party,
-                "party_account": party_account,
-                "get_outstanding_invoices": True,
-                "get_orders_to_be_billed": False,
-                "vouchers": [
-                    {
-                        "voucher_type": config.invoice_doctype,
-                        "voucher_no": invoice.name,
-                    }
-                ],
-                "book_advance_payments_in_separate_party_account": False,
-            },
+            frappe._dict(
+                {
+                    "posting_date": doc.date,
+                    "company": invoice.company,
+                    "party_type": config.party_doctype,
+                    "payment_type": config.payment_type,
+                    "party": party,
+                    "party_account": party_account,
+                    "get_outstanding_invoices": True,
+                    "get_orders_to_be_billed": False,
+                    "vouchers": [
+                        frappe._dict(
+                            {
+                                "voucher_type": config.invoice_doctype,
+                                "voucher_no": invoice.name,
+                            }
+                        )
+                    ],
+                    "book_advance_payments_in_separate_party_account": False,
+                }
+            ),
             validate=True,
         )
         or []
