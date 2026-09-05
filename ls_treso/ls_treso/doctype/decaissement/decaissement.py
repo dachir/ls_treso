@@ -8,15 +8,7 @@ from frappe.utils import getdate
 from frappe.utils import flt
 from ls_treso.ls_treso.doctype.devise.devise import get_cours
 from erpnext.setup.utils import get_exchange_rate
-from ls_treso.ls_treso.utils.payment_utils import (
-	ACTIVE_MODES,
-	cancel_payment_entry,
-	get_ls_treso_mode,
-	make_payment_entry,
-	prepare_operation,
-	reconcile_advances,
-	unreconcile_advances,
-)
+from ls_treso.ls_treso.utils.accounting_orchestrator_v2 import orchestrator, cancel
 
 class Decaissement(Document):
 	
@@ -68,71 +60,18 @@ class Decaissement(Document):
 		frappe.db.update("Demande Paiement", demande_paiement, "positione", 0 if type == "remove" else 1)
 				
 
-	
 	def before_submit(self):
-		mode = get_ls_treso_mode()
-
-		if self.type_caisse == 'Caisse':
-			init_doc = frappe.get_doc("Caisse Initialisation", self.initialisation)
-			if float(init_doc.solde_final) < float(self.montant):
-				frappe.throw("Le montant actuellement en caisse ne permet pas de faire cette opération.\n Il faut augmenter le solde!!!")
-
-		if mode in ACTIVE_MODES:
-			# Invoice creation and Payment Entry must remain atomic. If the payment
-			# fails, rollback the automatically created invoice as well.
-			save_point = "ls_treso_decaissement_accounting"
-			frappe.db.savepoint(save_point)
-			try:
-				prepare_operation(self)
-				make_payment_entry(self)
-				reconcile_advances(self)
-			except Exception:
-				frappe.db.rollback(save_point=save_point)
-				raise
-		else:
-			total = 0.00
-			for details in self.details_operation_de_caisse:
-				total += float(details.montant_devise_ref)
-
-			if float(total) != float(self.montant_reference):
-				frappe.throw("Le montant saisie en entête de l'opération " + str(self.montant_reference) + " est différent du total des montants en détails " + str(total))
-
-			self.generate_journal_entry()
-			if self.comptabilite_erpnext == 1:
-				self.make_accrual_jv_entry()
+		orchestrator(self)
+	
 	def on_submit(self):
 		init_doc = frappe.get_doc("Caisse Initialisation", self.initialisation)
 		init_doc.solde_final -= float(self.montant_reference)
 		init_doc.save()
 		
-
 	def on_cancel(self):
-		init_doc = frappe.get_doc("Caisse Initialisation", self.initialisation)
-		#if init_doc.docstatus == 0:
-		init_doc.solde_final += float(self.montant_reference)
-		init_doc.save()
-		for d in self.details_operation_de_caisse:
-			if d.demande_paiement :
-				frappe.db.sql(
-					"""
-						UPDATE `tabDemande Paiement` 
-						SET positione = 0
-						WHERE name = %(name)s
-					""",{ "name": d.demande_paiement }, as_dict = 1
-				)
-		
-		self.comptabilisation.clear()
+		cancel(self)
 
-
-		mode = get_ls_treso_mode()
-		if mode in ACTIVE_MODES:
-			unreconcile_advances(self)
-			cancel_payment_entry(self)
-		elif self.comptabilite_erpnext == 1:
-			nb = frappe.db.count("Journal Entry", {"cheque_no": self.name})
-			if nb > 0:
-				jv = frappe.get_doc("Journal Entry", {"cheque_no": self.name})
-				jv.cancel()
+	
 	def after_delete(self):
 		for d in self.details_operation_de_caisse:
 			if d.demande_paiement :

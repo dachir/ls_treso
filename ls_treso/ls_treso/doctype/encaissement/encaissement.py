@@ -7,16 +7,7 @@ from frappe.model.document import Document
 from frappe.utils import getdate
 from frappe.utils import flt
 from ls_treso.ls_treso.doctype.devise.devise import get_cours
-from erpnext.setup.utils import get_exchange_rate
-from ls_treso.ls_treso.utils.payment_utils import (
-	ACTIVE_MODES,
-	cancel_payment_entry,
-	get_ls_treso_mode,
-	make_payment_entry,
-	prepare_operation,
-	reconcile_advances,
-	unreconcile_advances,
-)
+from ls_treso.ls_treso.utils.accounting_orchestrator_v2 import orchestrator, cancel
 
 class Encaissement(Document):
 	def validate(self):
@@ -41,31 +32,8 @@ class Encaissement(Document):
 			frappe.throw("La date de saisie " + str(self.date) + " doit être conforme à la date d'initialisation " + date_split)
 
 	def before_submit(self):
-		mode = get_ls_treso_mode()
-
-		if mode in ACTIVE_MODES:
-			# Invoice creation and Payment Entry must remain atomic. If the payment
-			# fails, rollback the automatically created invoice as well.
-			save_point = "ls_treso_encaissement_accounting"
-			frappe.db.savepoint(save_point)
-			try:
-				prepare_operation(self)
-				make_payment_entry(self)
-				reconcile_advances(self)
-			except Exception:
-				frappe.db.rollback(save_point=save_point)
-				raise
-		else:
-			total = 0.00
-			for details in self.details_operation_de_caisse:
-				total += float(details.montant_devise_ref)
-
-			if float(total) != float(self.montant_reference):
-				frappe.throw("Le montant saisie en entête de l'opération " + str(self.montant_reference) + " est différent du total des montants en détails " + str(total))
-
-			self.generate_journal_entry()
-			if self.comptabilite_erpnext == 1:
-				self.make_accrual_jv_entry()
+		orchestrator(self)
+	
 	def on_submit(self):
 		init_doc = frappe.get_doc("Caisse Initialisation", self.initialisation)
 		init_doc.solde_final += float(self.montant_reference)
@@ -80,23 +48,8 @@ class Encaissement(Document):
 		#)
 
 	def on_cancel(self):
-		init_doc = frappe.get_doc("Caisse Initialisation", self.initialisation)
-		#if init_doc.docstatus == 0:
-		init_doc.solde_final -= float(self.montant_reference)
-		init_doc.save()
+		cancel(self)
 
-		self.comptabilisation.clear()
-
-
-		mode = get_ls_treso_mode()
-		if mode in ACTIVE_MODES:
-			unreconcile_advances(self)
-			cancel_payment_entry(self)
-		elif self.comptabilite_erpnext == 1:
-			nb = frappe.db.count("Journal Entry", {"cheque_no": self.name})
-			if nb > 0:
-				jv = frappe.get_doc("Journal Entry", {"cheque_no": self.name})
-				jv.cancel()
 	def create_row(self, type, account, cours, amount, type_tiers=None, tiers=None, cc1=None, cc2=None, cc3=None, cc4=None, cc5=None, cc6=None, cc7=None, cc8=None, cc9=None, cc10=None):
 		row = {}
 		company_currency = frappe.db.get_value("Societe",self.societe,"devise_de_base") 
