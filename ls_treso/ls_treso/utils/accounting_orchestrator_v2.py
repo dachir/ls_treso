@@ -88,6 +88,13 @@ def operation_amount(doc, account):
         return flt(doc.montant_reference)
     return convert(doc.montant, doc.devise, currency, doc.date)
 
+def operation_remarks(doc):
+    return (
+        doc.get("remarques")
+        or doc.get("commentaires")
+        or doc.get("designation")
+        or f"{doc.doctype} {doc.name}"
+    )
 
 class DimensionManager:
     def __init__(self, doc):
@@ -334,7 +341,7 @@ class InvoiceManager:
         for field, value in self.dimensions.invoice.items():
             inv.set(field, value)
 
-        inv.remarks = _("Créée automatiquement depuis {0} {1}").format(self.doc.doctype, self.doc.name)
+        inv.remarks = operation_remarks(self.doc)
         inv.insert()
         inv.submit()
         return inv
@@ -557,7 +564,8 @@ class PaymentManager:
 
     def _submit(self, pe):
         pe.posting_date, pe.reference_no, pe.reference_date = self.doc.date, self.doc.name, self.doc.date
-        pe.remarks = _("{0} LS Tréso {1}").format(self.doc.doctype, self.doc.name)
+        pe.custom_remarks = 1
+        pe.remarks = "{} | {} {}".format(operation_remarks(self.doc), self.doc.doctype, self.doc.name,)
         for field, value in self.dimensions.payment.items():
             pe.set(field, value)
         pe.submit()
