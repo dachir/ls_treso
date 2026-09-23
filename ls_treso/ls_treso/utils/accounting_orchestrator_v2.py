@@ -100,6 +100,7 @@ class DimensionManager:
             "payment": frappe.get_meta("Payment Entry"),
         }
         rows, payment, header = {}, {}, {}
+        ignored_payment_dimensions = set()
 
         for row in self.doc.details_operation_de_caisse or []:
             values = {"item": {}, "payment": {}}
@@ -124,9 +125,14 @@ class DimensionManager:
                     if target == "item":
                         values["item"][field] = value
                     elif target == "payment":
+                        if field in ignored_payment_dimensions:
+                            continue
+
                         if field in payment and payment[field] != value:
-                            frappe.throw(_("Plusieurs valeurs pour la dimension {0}").format(doctype))
-                        payment[field] = value
+                            payment.pop(field, None)
+                            ignored_payment_dimensions.add(field)
+                        else:
+                            payment[field] = value
                     else:
                         header.setdefault(field, set()).add(value)
                 if doctype != "Nature Operations" and not found:
