@@ -122,6 +122,11 @@ class DimensionManager:
                     if not field:
                         continue
                     found = True
+                    value = self._resolve_value(
+                        metas[target],
+                        field,
+                        value,
+                    )
                     if target == "item":
                         values["item"][field] = value
                     elif target == "payment":
@@ -145,6 +150,48 @@ class DimensionManager:
             payment=payment,
             invoice={k: next(iter(v)) for k, v in header.items() if len(v) == 1},
         )
+
+    @staticmethod
+    def _resolve_value(meta, fieldname, value):
+        df = meta.get_field(fieldname)
+
+        if not df or df.fieldtype != "Link" or not df.options:
+            return value
+
+        # Cas particulier ERPNext Project :
+        # LS Tréso peut stocker Project.project_name
+        # alors que le Link ERPNext attend Project.name.
+        if df.options == "Project":
+            if frappe.db.exists("Project", value):
+                return value
+
+            project = frappe.db.get_value(
+                "Project",
+                {"project_name": value},
+                "name",
+            )
+
+            if project:
+                return project
+
+            frappe.throw(
+                _("Projet ERPNext introuvable : {0}").format(value)
+            )
+
+        # Toutes les autres dimensions restent strictes.
+        if not frappe.db.exists(df.options, value):
+            frappe.throw(
+                _(
+                    "Valeur invalide pour la dimension {0}: "
+                    "{1} n'existe pas dans {2}"
+                ).format(
+                    fieldname,
+                    value,
+                    df.options,
+                )
+            )
+
+        return value
 
     @staticmethod
     def _field(meta, correspondence):
