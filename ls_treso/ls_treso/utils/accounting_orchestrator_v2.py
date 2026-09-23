@@ -147,14 +147,72 @@ class DimensionManager:
         )
 
     @staticmethod
-    def _field(meta, dimension_doctype):
-        field = frappe.db.get_value(
-            "Accounting Dimension", {"document_type": dimension_doctype, "disabled": 0}, "fieldname"
+    def _field(meta, correspondence):
+        if not correspondence:
+            return None
+
+        # 1. Cas le plus simple :
+        # correspondance contient directement le fieldname ERPNext
+        # ex: project, branch, utility_property
+        if meta.has_field(correspondence):
+            return correspondence
+
+        # 2. correspondance peut être le fieldname d'une
+        # Accounting Dimension configurée dans ERPNext
+        dimension = frappe.db.get_value(
+            "Accounting Dimension",
+            {
+                "fieldname": correspondence,
+                "disabled": 0,
+            },
+            ["fieldname", "document_type"],
+            as_dict=True,
         )
-        if field and meta.has_field(field):
-            return field
+
+        # 3. Compatibilité :
+        # correspondance contient éventuellement le DocType
+        # ex: Project au lieu de project
+        if not dimension:
+            dimension = frappe.db.get_value(
+                "Accounting Dimension",
+                {
+                    "document_type": correspondence,
+                    "disabled": 0,
+                },
+                ["fieldname", "document_type"],
+                as_dict=True,
+            )
+
+        if dimension:
+            if (
+                dimension.fieldname
+                and meta.has_field(dimension.fieldname)
+            ):
+                return dimension.fieldname
+
+            return next(
+                (
+                    df.fieldname
+                    for df in meta.fields
+                    if (
+                        df.fieldtype == "Link"
+                        and df.options == dimension.document_type
+                    )
+                ),
+                None,
+            )
+
+        # 4. Dernière possibilité :
+        # correspondance contient directement le DocType d'un Link
         return next(
-            (df.fieldname for df in meta.fields if df.fieldtype == "Link" and df.options == dimension_doctype),
+            (
+                df.fieldname
+                for df in meta.fields
+                if (
+                    df.fieldtype == "Link"
+                    and df.options == correspondence
+                )
+            ),
             None,
         )
 
