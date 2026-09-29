@@ -27,9 +27,28 @@ class Encaissement(Document):
 			frappe.throw("Vous ne pouvez enregistrer d'opérations sur le Numéro: " + self.initialisation + ". Veuillez choisir un numéro valide!")
 		
 		date_init = getdate(frappe.db.get_value('Caisse Initialisation', self.initialisation, 'date_initialisation'))
-		date_split = str(date_init).split(":")[0]
-		if date_split != str(self.date):
-			frappe.throw("La date de saisie " + str(self.date) + " doit être conforme à la date d'initialisation " + date_split)
+		if getdate(self.date) != date_init:
+			frappe.throw("La date de saisie " + str(getdate(self.date)) + " doit être conforme à la date d'initialisation " + str(date_init))
+
+	def before_cancel(self):
+		if not self.initialisation:
+			return
+
+		initialisation = frappe.db.get_value(
+			"Caisse Initialisation",
+			self.initialisation,
+			["docstatus", "date_fermeture"],
+			as_dict=True,
+		)
+		if initialisation and (
+			initialisation.docstatus == 1
+			or (initialisation.docstatus == 0 and initialisation.date_fermeture)
+		):
+			frappe.throw(
+				"Vous ne pouvez pas annuler cette opération car la Caisse Initialisation "
+				+ self.initialisation
+				+ " est validée ou clôturée."
+			)
 
 	def before_submit(self):
 		orchestrator(self)
