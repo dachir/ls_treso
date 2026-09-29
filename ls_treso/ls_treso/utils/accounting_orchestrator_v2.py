@@ -603,6 +603,8 @@ def process_special(doc, dimensions, special):
 
 
 def internal_transfer(doc, source, target, paid, received, dimensions):
+    paid, received = flt(paid), flt(received)
+
     if source == target or frappe.db.get_value("Account", source, "company") != frappe.db.get_value("Account", target, "company"):
         frappe.throw(_("Comptes de transfert invalides"))
 
@@ -629,6 +631,9 @@ def internal_transfer(doc, source, target, paid, received, dimensions):
 
 
 def orchestrator(doc):
+    if doc.flags.get("skip_ls_treso_payment_entry"):
+        return
+
     dimensions = DimensionManager(doc).validate()
     special = special_operation(doc)
     if special:
