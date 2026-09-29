@@ -658,3 +658,70 @@ def cancel(doc):
     name = frappe.db.get_value("Payment Entry", {"reference_no": doc.name, "docstatus": 1}, "name")
     if name:
         frappe.get_doc("Payment Entry", name).cancel()
+
+def _locked_initialisation_for_payment(payment_entry):
+    """Return the first locked Caisse Initialisation using this Payment Entry."""
+    transactions = []
+
+    reference_no = frappe.db.get_value("Payment Entry", payment_entry, "reference_no")
+    if reference_no:
+        for doctype in ("Encaissement", "Decaissement"):
+            if frappe.db.exists(doctype, reference_no):
+                transactions.append((doctype, reference_no))
+
+    for row in frappe.get_all(
+        "Advance Allocation",
+        filters={"payment_entry": payment_entry},
+        fields=["parent", "parenttype"],
+    ):
+        if row.parenttype in ("Encaissement", "Decaissement"):
+            transactions.append((row.parenttype, row.parent))
+
+    seen = set()
+    for doctype, name in transactions:
+        if (doctype, name) in seen:
+            continue
+        seen.add((doctype, name))
+
+        transaction = frappe.db.get_value(
+            doctype, name, ["initialisation", "docstatus"], as_dict=True
+        )
+        if not transaction or transaction.docstatus == 2 or not transaction.initialisation:
+            continue
+
+        initialisation = frappe.db.get_value(
+            "Caisse Initialisation",
+            transaction.initialisation,
+            ["docstatus", "date_fermeture"],
+            as_dict=True,
+        )
+        if initialisation and (
+            initialisation.docstatus == 1
+            or (initialisation.docstatus == 0 and initialisation.date_fermeture)
+        ):
+            return transaction.initialisation
+
+    return None
+
+
+def validate_payment_entry_cancel(doc, method=None):
+    initialisation = _locked_initialisation_for_payment(doc.name)
+    if initialisation:
+        frappe.throw(
+            _("Impossible d'annuler ce Payment Entry : il est utilisé par la Caisse Initialisation {0}, validée ou clôturée.").format(
+                initialisation
+            )
+        )
+
+
+def validate_unreconcile_payment(doc, method=None):
+    if doc.voucher_type != "Payment Entry":
+        return
+    initialisation = _locked_initialisation_for_payment(doc.voucher_no)
+    if initialisation:
+        frappe.throw(
+            _("Impossible de défaire ce rapprochement : le Payment Entry est utilisé par la Caisse Initialisation {0}, validée ou clôturée.").format(
+                initialisation
+            )
+        )
+

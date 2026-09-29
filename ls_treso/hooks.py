@@ -102,13 +102,14 @@ app_license = "MIT"
 # ---------------
 # Hook on document methods and events
 
-# doc_events = {
-#	"*": {
-#		"on_update": "method",
-#		"on_cancel": "method",
-#		"on_trash": "method"
-#	}
-# }
+doc_events = {
+    "Payment Entry": {
+        "before_cancel": "ls_treso.ls_treso.utils.accounting_orchestrator_v2.validate_payment_entry_cancel",
+    },
+    "Unreconcile Payment": {
+        "before_submit": "ls_treso.ls_treso.utils.accounting_orchestrator_v2.validate_unreconcile_payment",
+    },
+}
 
 # Scheduled Tasks
 # ---------------
